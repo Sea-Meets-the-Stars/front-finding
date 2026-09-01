@@ -1,0 +1,101 @@
+# ---------------------------------------------------------------------------
+# build-fronts -- single-timestep test run, SURF pipeline.
+#
+# A small end-to-end exercise of the whole chain: build the store, export
+# gradb2, find fronts, group them, and co-locate.  One snapshot, one subset.
+#
+# `source.output.folder` is deliberately a NEW path.  Nothing exists under it,
+# so the gradb2 step finds no store and hands the work to dbof -- which is the
+# point: this config exercises generation, not just the front-finding stages.
+# Expect the first run to take a while and to write to S3.
+#
+# Products land under {products.root}/TEST01/SURF/20111204_000000/,
+# separate from the V5 production tree.
+#
+# Driven by notebooks/test_run_single_timestep.ipynb, or from the CLI:
+#
+#   build-fronts --config configs/run/run_test_single_timestep.yaml \
+#       --build-version TEST01 --steps gradb2,find,group
+#
+# ---------------------------------------------------------------------------
+
+# ===========================================================================
+# source -- where the global LLC4320 fields come from (dbof's keys).
+# ===========================================================================
+source:
+
+  pipeline: "SURF"
+
+  run:
+    run_id: "test01"
+    log_dir: "./logs/"
+
+  output:
+    s3_endpoint: "https://s3-west.nrp-nautilus.io"
+    bucket: "dbof/"
+    # New path -> no store here yet -> the gradb2 step triggers a dbof run.
+    # Stores will be written to
+    #   s3://dbof/test_globals_for_front_finding/test01/20111204_000000/frontal_structure.zarr
+    folder: "test_globals_for_front_finding/"
+
+  runtime:
+    zarr_async_concurrency: 8
+    dask_scheduler: "distributed"
+    dask_n_workers: 4
+    dask_threads_per_worker: 4
+
+  # Only the subset that owns gradb2.  That is all the find/group stages need,
+  # and on SURF it also carries seven other channels to co-locate against
+  # (gradsalt2, gradtheta2, gradeta2, gradrho2, turner_angle, density,
+  # buoyancy) -- so the colocate step costs no extra generation.
+  #
+  # Add `- icearea` to enable the ice-mask flags below; it builds a second
+  # store and adds SIarea to the co-located channels.
+  active_subsets:
+    - frontal_structure
+
+  # Static grid store: lat/lon for every (j, i) on the global grid.  Separate
+  # from the snapshot stores because it does not vary with timestep.  These are
+  # the defaults, so the block can be omitted.
+  grid:
+    bucket: "dbof"
+    folder: "LLC4320_GRID_2D"
+    dataset_name: "llc4320_grid.zarr"
+
+  data:
+    # One snapshot -- the first of the 100 transferred to LLC4320_RAW/SURFACE.
+    date_iterations:
+      - '2011-12-04 00:00:00'
+
+# ===========================================================================
+# finding -- how fronts are found and what gets measured.
+# ===========================================================================
+finding:
+
+  # Keeps this run's products out of the V5 tree.
+  build_version: "TEST01"
+
+  # finding_config_D.yaml: window 64, threshold 85, sharpen + despur.
+  config: "D"
+
+  gradb2_root: "gradb2"
+  suffix: "sfc"           # no effect on SURF
+
+  # Both off -- enabling either needs `icearea` in active_subsets above.
+  ice_mask_find:  false
+  ice_mask_props: false
+
+  percentiles: [25, 75, 90]
+
+  exclude_roots: []
+
+# ===========================================================================
+# products -- where this build writes.
+#
+# Each step reads the previous step's output, so the front products need
+# somewhere on disk; `push` copies the finished set to S3.  A relative path
+# resolves against THIS FILE, not the working directory, so the same config
+# behaves identically from the CLI, a notebook, or anywhere else.
+# ===========================================================================
+products:
+  root: "../../output"

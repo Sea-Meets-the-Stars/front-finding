@@ -1,0 +1,65 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "front-finding"
+version = "0.1.0.dev0"
+description = "Ocean front detection and characterisation for LLC4320"
+readme = "README.md"
+license = { text = "BSD" }
+authors = [
+    { name = "J. Xavier Prochaska", email = "jxp@ucsc.edu" },
+    { name = "P. Cornillon" },
+    { name = "J. Tallman", email = "jttallman@ucdavis.edu" },
+]
+classifiers = [
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Oceanography",
+    "Programming Language :: Python :: 3",
+]
+urls = { "Homepage" = "https://github.com/Sea-Meets-the-Stars/front-finding" }
+
+# dbof requires >=3.12, and this package imports it at module scope.
+requires-python = ">=3.12"
+
+dependencies = [
+    "numpy",
+    "pandas",
+    "scipy",
+    "scikit-image",
+    "scikit-learn",
+    "skan",
+    "dask",
+    "xarray",
+    "pyyaml",
+    "tqdm",
+    "pyarrow",
+    # Field generation and export are delegated to the preprocessing repo;
+    # front_finding.llc.io and front_finding.properties.run import it at
+    # module scope.  Not on PyPI, so it is pinned to its git remote.
+    "dbof-in-native-grid @ git+https://github.com/Sea-Meets-the-Stars/llc4320-native-grid-preprocessing.git@padding_bug_xgcm",
+]
+
+[project.optional-dependencies]
+test = ["pytest"]
+# For notebooks/ -- exploring a run's output.
+notebook = ["jupyter", "matplotlib"]
+
+[project.scripts]
+build-fronts = "front_finding.cli.build_fronts:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+# Loaded at runtime by front_finding.finding.config.config_filename().
+"front_finding.finding" = ["configs/*.yaml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Integration tests build a Fronts tree in tmp_path and run the real
+# find/group/colocate stages; they are slower but need no network.
+markers = [
+    "integration: exercises the real pipeline stages on a temp filesystem",
+]

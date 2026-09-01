@@ -1,6 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Tooling
+.pytest_cache/
+.ipynb_checkpoints/
+.idea/
+
+# Run output
+logs/
+
+# CUDA intermediates
 *.i
 *.ii
 *.gpu
 *.ptx
 *.cubin
 *.fatbin
+output/

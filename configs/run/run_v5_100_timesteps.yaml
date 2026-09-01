@@ -1,0 +1,230 @@
+# ---------------------------------------------------------------------------
+# build-fronts -- SURF pipeline, 100 timesteps.
+#
+# Produces, for each of the 100 snapshots below:
+#     LLC4320_{timestamp}_v2_2_01_bfronts.npy    (step: find)
+#     the label map + front-group tables            (step: group)
+#
+# under {products.root}/V5/SURF/{YYYYMMDD_HHMMSS}/, then copied back to
+# s3://dbof/globals_for_cutouts/v2_2_01/{YYYYMMDD_HHMMSS}/Fronts/  (step: push).
+#
+#   build-fronts --config configs/run/run_v5_100_timesteps.yaml --steps gradb2
+#   build-fronts --config configs/run/run_v5_100_timesteps.yaml --steps find
+#   build-fronts --config configs/run/run_v5_100_timesteps.yaml --steps group
+#   build-fronts --config configs/run/run_v5_100_timesteps.yaml --steps push
+#
+# To try one timestep first, comment out the other dates below.
+# ---------------------------------------------------------------------------
+
+# ===========================================================================
+# source -- where the global LLC4320 fields come from.
+#
+# These are the preprocessing repo's (dbof) keys, not this repo's.  The block
+# is written out verbatim as a standalone dbof config whenever a zarr store
+# needs building, so it keeps dbof's own key names and nesting.  Nothing here
+# describes front finding.
+# ===========================================================================
+source:
+
+  pipeline: "SURF"
+
+  run:
+    # The source dataset.  Locates the zarr stores on S3 and is stamped into
+    # every output filename; the output *directory* comes from
+    # finding.build_version.
+    run_id: "v2_2_01"
+    log_dir: "./logs/"
+
+  output:
+    # dbof's output, and therefore this build's input.  Stores live at
+    # {bucket}/{folder}/{run_id}/{date_prefix}/{subset}.zarr, i.e.
+    #   s3://dbof/globals_for_cutouts/v2_2_01/20111204_000000/frontal_structure.zarr
+    # Without `folder` it would resolve to surface_fields/ for SURF.
+    s3_endpoint: "https://s3-west.nrp-nautilus.io"
+    bucket: "dbof/"
+    folder: "globals_for_cutouts/"
+
+  runtime:
+    zarr_async_concurrency: 8
+    dask_scheduler: "distributed"
+    dask_n_workers: 4
+    dask_threads_per_worker: 4
+
+  # Subsets to read.  The gradb2/find/group steps only ever touch the subset
+  # that owns gradb2, so frontal_structure is all they need; icearea is listed
+  # because the ice mask is read from it.  Uncomment the rest before running
+  # the colocate step -- they are what gets co-located.
+  #
+  # Each name must have a matching {name}.zarr under the run_id above.  Channel
+  # lists and dataset names live in
+  # dbof.global_dataset_creation.subset_definitions, keyed by pipeline.
+  active_subsets:
+    - frontal_structure   # gradb2, gradsalt2, gradtheta2, gradeta2, gradrho2,
+                          # turner_angle, density, buoyancy
+    - icearea             # SIarea
+    # - kinematic         # relative_vorticity, strain_*, divergence,
+    #                     # rossby_number, okubo_weiss, coriolis_f
+    # - frontogenesis     # frontogenesis_tendency/geo/ageo, ug, vg
+    # - native_fields     # Theta, Salt, Eta, W (+ computed U, V)
+    # - surface_wind      # oceTAUX, oceTAUY, oceQnet, wind_stress_curl,
+    #                     # ekman_pumping, u_ekman, v_ekman
+
+  # depth_suffixes has no effect on SURF -- every channel is inherently 2D.
+
+  # Static grid store: lat/lon for every (j, i) on the global grid.  Separate
+  # from the snapshot stores because it does not vary with timestep.  These are
+  # the defaults, so the block can be omitted.
+  grid:
+    bucket: "dbof"
+    folder: "LLC4320_GRID_2D"
+    dataset_name: "llc4320_grid.zarr"
+
+  data:
+    # ISO 'YYYY-MM-DD HH:MM:SS'.  100 timesteps, 2011-12-04 to 2012-11-15.
+    # These are the snapshots transferred to LLC4320_RAW/SURFACE by
+    # llc4320-native-grid-preprocessing/configs/transfer/run_surface_100.yaml.
+    date_iterations:
+      - '2011-12-04 00:00:00'
+      - '2011-12-06 18:00:00'
+      - '2011-12-09 19:00:00'
+      - '2011-12-12 11:00:00'
+      - '2011-12-16 03:00:00'
+      - '2011-12-18 17:00:00'
+      - '2011-12-22 08:00:00'
+      - '2011-12-25 15:00:00'
+      - '2011-12-29 16:00:00'
+      - '2012-01-04 11:00:00'
+      - '2012-01-07 09:00:00'
+      - '2012-01-11 19:00:00'
+      - '2012-01-13 21:00:00'
+      - '2012-01-17 18:00:00'
+      - '2012-01-22 13:00:00'
+      - '2012-01-25 05:00:00'
+      - '2012-01-28 09:00:00'
+      - '2012-01-31 14:00:00'
+      - '2012-02-04 04:00:00'
+      - '2012-02-08 23:00:00'
+      - '2012-02-10 04:00:00'
+      - '2012-02-15 14:00:00'
+      - '2012-02-18 14:00:00'
+      - '2012-02-19 18:00:00'
+      - '2012-02-24 15:00:00'
+      - '2012-02-29 18:00:00'
+      - '2012-03-03 05:00:00'
+      - '2012-03-04 21:00:00'
+      - '2012-03-10 23:00:00'
+      - '2012-03-14 08:00:00'
+      - '2012-03-18 06:00:00'
+      - '2012-03-19 10:00:00'
+      - '2012-03-22 15:00:00'
+      - '2012-03-28 20:00:00'
+      - '2012-03-29 09:00:00'
+      - '2012-04-03 18:00:00'
+      - '2012-04-05 15:00:00'
+      - '2012-04-09 22:00:00'
+      - '2012-04-14 01:00:00'
+      - '2012-04-17 08:00:00'
+      - '2012-04-20 19:00:00'
+      - '2012-04-23 00:00:00'
+      - '2012-04-26 10:00:00'
+      - '2012-04-30 08:00:00'
+      - '2012-05-03 11:00:00'
+      - '2012-05-09 07:00:00'
+      - '2012-05-12 07:00:00'
+      - '2012-05-16 06:00:00'
+      - '2012-05-18 09:00:00'
+      - '2012-05-23 03:00:00'
+      - '2012-05-27 04:00:00'
+      - '2012-05-29 08:00:00'
+      - '2012-06-02 03:00:00'
+      - '2012-06-07 12:00:00'
+      - '2012-06-10 08:00:00'
+      - '2012-06-14 11:00:00'
+      - '2012-06-15 21:00:00'
+      - '2012-06-20 11:00:00'
+      - '2012-06-24 21:00:00'
+      - '2012-06-27 08:00:00'
+      - '2012-07-01 13:00:00'
+      - '2012-07-04 12:00:00'
+      - '2012-07-08 02:00:00'
+      - '2012-07-10 11:00:00'
+      - '2012-07-15 16:00:00'
+      - '2012-07-16 14:00:00'
+      - '2012-07-21 16:00:00'
+      - '2012-07-25 16:00:00'
+      - '2012-07-29 15:00:00'
+      - '2012-08-01 00:00:00'
+      - '2012-08-04 00:00:00'
+      - '2012-08-07 07:00:00'
+      - '2012-08-11 04:00:00'
+      - '2012-08-14 22:00:00'
+      - '2012-08-19 06:00:00'
+      - '2012-08-23 08:00:00'
+      - '2012-08-24 00:00:00'
+      - '2012-08-30 12:00:00'
+      - '2012-09-01 15:00:00'
+      - '2012-09-04 13:00:00'
+      - '2012-09-09 03:00:00'
+      - '2012-09-12 07:00:00'
+      - '2012-09-14 16:00:00'
+      - '2012-09-18 11:00:00'
+      - '2012-09-23 08:00:00'
+      - '2012-09-26 09:00:00'
+      - '2012-09-29 14:00:00'
+      - '2012-10-02 13:00:00'
+      - '2012-10-07 12:00:00'
+      - '2012-10-09 17:00:00'
+      - '2012-10-13 00:00:00'
+      - '2012-10-18 12:00:00'
+      - '2012-10-19 20:00:00'
+      - '2012-10-23 05:00:00'
+      - '2012-10-28 09:00:00'
+      - '2012-10-31 14:00:00'
+      - '2012-11-02 03:00:00'
+      - '2012-11-05 18:00:00'
+      - '2012-11-10 06:00:00'
+      - '2012-11-15 09:00:00'
+
+# ===========================================================================
+# finding -- how fronts are found and what gets measured.  This repo's knobs.
+# Every key has a default in front_finding.config.build.FindingConfig, so the
+# whole block is optional.
+# ===========================================================================
+finding:
+
+  # Products land in {products.root}/{build_version}/{pipeline}/.
+  build_version: "V5"
+
+  # Front-finding config -> front_finding/finding/configs/finding_config_D.yaml
+  config: "D"
+
+  # The buoyancy-gradient channel fronts are found in.
+  gradb2_root: "gradb2"
+  suffix: "sfc"           # depth suffix; no effect on SURF
+
+  # Ice masking, per step.  As set here, fronts are found on the unmasked
+  # gradb2 field and the mask is applied later, to the fields the fronts are
+  # co-located with.  Either flag needs icearea.zarr for the same run_id and
+  # date -- the mask is read from it at export time.  ice_mask_find makes the
+  # gradb2 step build icearea.zarr alongside frontal_structure; ice_mask_props
+  # relies on the colocate step's full generate pass.
+  ice_mask_find:  false
+  ice_mask_props: false
+
+  # Extra percentile columns per co-located channel (colocate step), alongside
+  # the default mean/std/median.
+  percentiles: [25, 75, 90]
+
+  # Property roots to leave out of co-location.
+  exclude_roots: []
+
+# ===========================================================================
+# products -- where this build writes.
+#
+# Each step reads the previous step's output, so the front products need
+# somewhere on disk; `push` copies the finished set to S3.  A relative path
+# resolves against THIS FILE, not the working directory, so the same config
+# behaves identically from the CLI, a notebook, or anywhere else.
+# ===========================================================================
+products:
+  root: "../../output"
