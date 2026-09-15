@@ -38,7 +38,7 @@ dependencies = [
     # Field generation and export are delegated to the preprocessing repo;
     # front_finding.llc.io and front_finding.properties.run import it at
     # module scope.  Not on PyPI, so it is pinned to its git remote.
-    "dbof-in-native-grid @ git+https://github.com/Sea-Meets-the-Stars/llc4320-native-grid-preprocessing.git",
+    "dbof-in-native-grid @ git+https://github.com/Sea-Meets-the-Stars/llc4320-native-grid-preprocessing.git@main",
 ]
 
 [project.optional-dependencies]
