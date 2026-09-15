@@ -1,13 +1,11 @@
 """ Run front finding """
-import os
 
-from front_finding.finding import io as finding_io
 from front_finding.finding import config as find_config
 from front_finding.finding import algorithms as finding_algorithms
 from front_finding.llc import source as llc_source
 
 
-def find_gradb2_fronts(cfg, timestamp: str, config: str, version: str,
+def find_gradb2_fronts(cfg, store, timestamp: str, date: str, config: str,
                 gradb2_field: str, gradb2_subset: str,
                 clobber: bool = False):
     """Find the fronts in a gradb2 field.
@@ -15,20 +13,19 @@ def find_gradb2_fronts(cfg, timestamp: str, config: str, version: str,
     The field is read straight from the S3 zarr store into memory.
 
     Args:
-        cfg: The resolved run config (BuildJobConfig); locates the store.
+        cfg: The resolved run config (BuildJobConfig); locates the source store.
+        store: The FrontStore this build writes to.
         timestamp (str): Timestamp of the data to process.
+        date (str): Snapshot group in the store, ``YYYYMMDD_HHMMSS``.
         config (str): Front-finding config label (e.g. 'A').
-        version (str): Run tag used in the output filename.
         gradb2_field (str): Fully-expanded gradb2 channel name.  For the DEPTH
             pipeline this carries a suffix, e.g. 'gradb2_sfc'.
         gradb2_subset (str): The subset that owns *gradb2_field*.
         clobber (bool, optional): Overwrite an existing map. Defaults to False.
     """
 
-    # Check if the binary front field exists
-    bfile = finding_io.binary_filename(timestamp, config, version)
-    if os.path.isfile(bfile) and not clobber:
-        print(f"Binary front field {bfile} exists and clobber is False. Returning")
+    if store.has(date, 'find') and not clobber:
+        print(f"[{date}] fronts already found; pass clobber=True to redo")
         return
 
     # Read gradb2 from the store
@@ -47,10 +44,13 @@ def find_gradb2_fronts(cfg, timestamp: str, config: str, version: str,
     bparam['n_workers'] = 10
     bparam['verbose'] = True
 
-    # Do it
-    fronts = finding_algorithms.fronts_from_gradb2(gradb2, **bparam)
+    keep_raw = cfg.finding.save_unprocessed_binary
+    result = finding_algorithms.fronts_from_gradb2(
+        gradb2, return_unprocessed=keep_raw, **bparam)
+    fronts, unprocessed = result if keep_raw else (result, None)
 
-    # Save em
-    finding_io.save_binary_fronts(
-        fronts, timestamp, config, version)
+    store.write_binary(date, fronts, unprocessed=unprocessed,
+                       config=config,
+                       gradb2_channel=gradb2_field,
+                       gradb2_subset=gradb2_subset)
 

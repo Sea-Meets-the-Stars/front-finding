@@ -62,11 +62,11 @@ source:
     - frontal_structure   # gradb2, gradsalt2, gradtheta2, gradeta2, gradrho2,
                           # turner_angle, density, buoyancy
     - icearea             # SIarea
-    # - kinematic         # relative_vorticity, strain_*, divergence,
+    - kinematic         # relative_vorticity, strain_*, divergence,
     #                     # rossby_number, okubo_weiss, coriolis_f
-    # - frontogenesis     # frontogenesis_tendency/geo/ageo, ug, vg
-    # - native_fields     # Theta, Salt, Eta, W (+ computed U, V)
-    # - surface_wind      # oceTAUX, oceTAUY, oceQnet, wind_stress_curl,
+    #- frontogenesis     # frontogenesis_tendency/geo/ageo, ug, vg
+    - native_fields     # Theta, Salt, Eta, W (+ computed U, V)
+    - surface_wind      # oceTAUX, oceTAUY, oceQnet, wind_stress_curl,
     #                     # ekman_pumping, u_ekman, v_ekman
 
   # depth_suffixes has no effect on SURF -- every channel is inherently 2D.
@@ -84,107 +84,11 @@ source:
     # These are the snapshots transferred to LLC4320_RAW/SURFACE by
     # llc4320-native-grid-preprocessing/configs/transfer/run_surface_100.yaml.
     date_iterations:
-      - '2011-12-04 00:00:00'
-      - '2011-12-06 18:00:00'
-      - '2011-12-09 19:00:00'
-      - '2011-12-12 11:00:00'
       - '2011-12-16 03:00:00'
-      - '2011-12-18 17:00:00'
-      - '2011-12-22 08:00:00'
-      - '2011-12-25 15:00:00'
-      - '2011-12-29 16:00:00'
       - '2012-01-04 11:00:00'
-      - '2012-01-07 09:00:00'
-      - '2012-01-11 19:00:00'
-      - '2012-01-13 21:00:00'
-      - '2012-01-17 18:00:00'
-      - '2012-01-22 13:00:00'
-      - '2012-01-25 05:00:00'
-      - '2012-01-28 09:00:00'
-      - '2012-01-31 14:00:00'
-      - '2012-02-04 04:00:00'
       - '2012-02-08 23:00:00'
-      - '2012-02-10 04:00:00'
-      - '2012-02-15 14:00:00'
-      - '2012-02-18 14:00:00'
-      - '2012-02-19 18:00:00'
-      - '2012-02-24 15:00:00'
-      - '2012-02-29 18:00:00'
-      - '2012-03-03 05:00:00'
-      - '2012-03-04 21:00:00'
-      - '2012-03-10 23:00:00'
-      - '2012-03-14 08:00:00'
-      - '2012-03-18 06:00:00'
       - '2012-03-19 10:00:00'
-      - '2012-03-22 15:00:00'
-      - '2012-03-28 20:00:00'
-      - '2012-03-29 09:00:00'
-      - '2012-04-03 18:00:00'
-      - '2012-04-05 15:00:00'
-      - '2012-04-09 22:00:00'
-      - '2012-04-14 01:00:00'
-      - '2012-04-17 08:00:00'
-      - '2012-04-20 19:00:00'
-      - '2012-04-23 00:00:00'
-      - '2012-04-26 10:00:00'
-      - '2012-04-30 08:00:00'
-      - '2012-05-03 11:00:00'
-      - '2012-05-09 07:00:00'
-      - '2012-05-12 07:00:00'
-      - '2012-05-16 06:00:00'
-      - '2012-05-18 09:00:00'
-      - '2012-05-23 03:00:00'
-      - '2012-05-27 04:00:00'
-      - '2012-05-29 08:00:00'
-      - '2012-06-02 03:00:00'
-      - '2012-06-07 12:00:00'
-      - '2012-06-10 08:00:00'
-      - '2012-06-14 11:00:00'
-      - '2012-06-15 21:00:00'
-      - '2012-06-20 11:00:00'
-      - '2012-06-24 21:00:00'
-      - '2012-06-27 08:00:00'
-      - '2012-07-01 13:00:00'
-      - '2012-07-04 12:00:00'
-      - '2012-07-08 02:00:00'
-      - '2012-07-10 11:00:00'
-      - '2012-07-15 16:00:00'
-      - '2012-07-16 14:00:00'
-      - '2012-07-21 16:00:00'
-      - '2012-07-25 16:00:00'
-      - '2012-07-29 15:00:00'
-      - '2012-08-01 00:00:00'
-      - '2012-08-04 00:00:00'
-      - '2012-08-07 07:00:00'
       - '2012-08-11 04:00:00'
-      - '2012-08-14 22:00:00'
-      - '2012-08-19 06:00:00'
-      - '2012-08-23 08:00:00'
-      - '2012-08-24 00:00:00'
-      - '2012-08-30 12:00:00'
-      - '2012-09-01 15:00:00'
-      - '2012-09-04 13:00:00'
-      - '2012-09-09 03:00:00'
-      - '2012-09-12 07:00:00'
-      - '2012-09-14 16:00:00'
-      - '2012-09-18 11:00:00'
-      - '2012-09-23 08:00:00'
-      - '2012-09-26 09:00:00'
-      - '2012-09-29 14:00:00'
-      - '2012-10-02 13:00:00'
-      - '2012-10-07 12:00:00'
-      - '2012-10-09 17:00:00'
-      - '2012-10-13 00:00:00'
-      - '2012-10-18 12:00:00'
-      - '2012-10-19 20:00:00'
-      - '2012-10-23 05:00:00'
-      - '2012-10-28 09:00:00'
-      - '2012-10-31 14:00:00'
-      - '2012-11-02 03:00:00'
-      - '2012-11-05 18:00:00'
-      - '2012-11-10 06:00:00'
-      - '2012-11-15 09:00:00'
-
 # ===========================================================================
 # finding -- how fronts are found and what gets measured.  This repo's knobs.
 # Every key has a default in front_finding.config.build.FindingConfig, so the
@@ -193,7 +97,7 @@ source:
 finding:
 
   # Products land in {products.root}/{build_version}/{pipeline}/.
-  build_version: "V5"
+  build_version: "SMALL_DATASET"
 
   # Front-finding config -> front_finding/finding/configs/finding_config_D.yaml
   config: "D"
@@ -211,19 +115,18 @@ finding:
   ice_mask_find:  false
   ice_mask_props: false
 
+  properties_stats: ["mean", "std", "min", "max", "skew"]
+
+  # 'omit' drops NaN, 'propagate' lets one NaN pixel make a front's whole
+  # statistic NaN.  The fields carry NaN over land.
+  properties_nan_policy: "omit"
+
   # Extra percentile columns per co-located channel (colocate step), alongside
   # the default mean/std/median.
   # Pixels each front is dilated by before its properties are sampled, so the
   # statistics describe a band around the front rather than the skeleton
   # itself.  0 samples the front pixels alone.
-  properties_dilation_radius: 1
-
-  # Statistics per co-located channel.  Omit for mean/std/median.
-  properties_stats: ["mean", "std", "median"]
-
-  # 'omit' drops NaN, 'propagate' lets one NaN pixel make a front's whole
-  # statistic NaN.  The fields carry NaN over land.
-  properties_nan_policy: "omit"
+  properties_dilation_radius: 2
 
   # Thickness beyond that band, described separately in the store's
   # cross_properties table.  0 skips it.  Unlike the band above, this region
@@ -233,9 +136,7 @@ finding:
   # Restrict the band above to pixels the threshold flagged, so it follows the
   # gradient ridge's real width instead of a disc.  Needs binary_unprocessed in
   # the store.  The cross-front band stays unmasked and absorbs what is dropped.
-  dilate_only_to_front_pixels: false
-
-  percentiles: [25, 75, 90]
+  dilate_only_to_front_pixels: true
 
   # Property roots to leave out of co-location.
   exclude_roots: []

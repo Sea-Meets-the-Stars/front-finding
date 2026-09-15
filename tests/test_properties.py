@@ -4,9 +4,15 @@ Pure array code -- no dbof, no S3.  Co-location is the stage that turns fronts
 into a per-front table, so its statistics and its dilation are pinned here in
 detail.
 """
+import inspect
+import warnings
+
 import numpy as np
 import pandas as pd
 import pytest
+from scipy import ndimage
+
+from scipy.stats import skew
 
 from front_finding.properties import colocation, geometry, group_labels
 
@@ -223,6 +229,92 @@ def test_mismatched_property_shape_is_rejected(two_fronts):
             labeled, {'p': np.ones((8, 8))})
 
 
+def test_every_layer_defaults_to_omit(two_fronts):
+    """The default disagreed between layers; land must not poison a front."""
+    for fn in (colocation.colocate_fronts_with_properties,
+               colocation.cross_front_properties):
+        assert (inspect.signature(fn).parameters['nan_policy'].default
+                == 'omit'), fn.__name__
+    labeled = group_labels.label_fronts(two_fronts, connectivity=2)
+    prop = np.ones_like(labeled, dtype=float)
+    prop[5, 8] = np.nan                             # one land pixel on front 1
+    out = colocation.colocate_fronts_with_properties(
+        labeled, {'p': prop}, stats=['mean'])       # no nan_policy given
+    assert out['p_mean'].iloc[0] == pytest.approx(1.0)   # omit stepped over it
+
+
+# ---------------------------------------------------------------------------
+#  Skew -- the one stat scipy.ndimage cannot do
+# ---------------------------------------------------------------------------
+
+def test_skew_matches_scipy_on_clean_data(two_fronts):
+    labeled = group_labels.label_fronts(two_fronts, connectivity=2)
+    rng = np.random.default_rng(0)
+    prop = rng.gamma(2.0, size=labeled.shape)          # genuinely skewed
+    out = colocation.colocate_fronts_with_properties(
+        labeled, {'p': prop}, stats=['skew'])
+    assert out.loc[0, 'p_skew'] == pytest.approx(skew(prop[labeled == 1]))
+
+
+@pytest.mark.parametrize('policy', ['omit', 'propagate'])
+def test_skew_works_under_both_nan_policies(two_fronts, policy):
+    """scipy.ndimage has no skew, so propagate must fall back, not KeyError."""
+    labeled = group_labels.label_fronts(two_fronts, connectivity=2)
+    rng = np.random.default_rng(0)
+    prop = rng.gamma(2.0, size=labeled.shape)
+    out = colocation.colocate_fronts_with_properties(
+        labeled, {'p': prop}, stats=['skew'], nan_policy=policy)
+    assert np.isfinite(out['p_skew']).all()
+
+
+def test_skew_propagates_a_single_nan(two_fronts):
+    labeled = group_labels.label_fronts(two_fronts, connectivity=2)
+    rng = np.random.default_rng(0)
+    prop = rng.gamma(2.0, size=labeled.shape)
+    prop[5, 8] = np.nan                                # one land pixel, front 1
+    propagated = colocation.colocate_fronts_with_properties(
+        labeled, {'p': prop}, stats=['skew'], nan_policy='propagate')
+    omitted = colocation.colocate_fronts_with_properties(
+        labeled, {'p': prop}, stats=['skew'], nan_policy='omit')
+    assert np.isnan(propagated['p_skew'].iloc[0])
+    assert np.isfinite(omitted['p_skew'].iloc[0])
+    assert np.isfinite(propagated['p_skew'].iloc[1])   # the clean front survives
+
+
+def test_skew_of_a_flat_band_is_nan(two_fronts):
+    """Zero variance is 0/0; scipy warns and returns garbage, we say undefined."""
+    labeled = group_labels.label_fronts(two_fronts, connectivity=2)
+    out = colocation.colocate_fronts_with_properties(
+        labeled, {'p': np.ones_like(labeled, dtype=float)}, stats=['skew'])
+    assert np.isnan(out['p_skew']).all()
+
+
+def test_skew_of_too_few_points_is_nan():
+    """scipy returns 0.0 for two points -- a real number for an undefined value."""
+    assert np.isnan(colocation._skew(np.array([1.0, 5.0])))
+    assert np.isnan(colocation._skew(np.array([1.0])))
+    assert np.isfinite(colocation._skew(np.array([1.0, 2.0, 9.0])))
+
+
+def test_skew_emits_no_warnings_on_the_degenerate_cases():
+    """These fire constantly on real data; they must not reach the log."""
+    with warnings.catch_warnings():
+        warnings.simplefilter('error')
+        for v in (np.ones(20), np.full(20, np.nan), np.array([1.0, 2.0])):
+            assert np.isnan(colocation._skew(v))
+
+
+def test_skew_is_reachable_from_the_cross_front_pass():
+    lab = np.zeros((40, 40), np.int32)
+    lab[10, 5:35] = 1
+    core = colocation._dilate_labeled_array(lab, np.array([1]), 1)
+    rng = np.random.default_rng(0)
+    out = colocation.cross_front_properties(
+        lab, core, {'p': rng.gamma(2.0, size=lab.shape)}, np.array([1]), 1, 6,
+        stats=['skew'])
+    assert np.isfinite(out.loc[0, 'p_skew'])
+
+
 def test_bad_nan_policy_is_rejected(two_fronts):
     labeled = group_labels.label_fronts(two_fronts, connectivity=2)
     with pytest.raises(ValueError, match='nan_policy'):
@@ -236,3 +328,106 @@ def test_no_fronts_gives_an_empty_frame():
     df = colocation.colocate_fronts_with_properties(
         labeled, {'p': np.ones((16, 16))})
     assert df.empty
+
+
+# ---------------------------------------------------------------------------
+#  Cross-front properties -- the surroundings, which may overlap
+# ---------------------------------------------------------------------------
+
+def _pair(gap=6):
+    """Two parallel fronts *gap* rows apart, plus their step-1 core."""
+    lab = np.zeros((40, 40), np.int32)
+    lab[10, 5:35] = 1
+    lab[10 + gap, 5:35] = 2
+    core = colocation._dilate_labeled_array(lab, np.array([1, 2]), 1)
+    return lab, core
+
+
+def test_the_mask_limits_where_a_front_dilates_to():
+    lab = np.zeros((20, 20), np.int32)
+    lab[10, 5:15] = 1
+    mask = np.zeros((20, 20), bool)
+    mask[9:12, :] = True                      # one row either side only
+    free = colocation._dilate_labeled_array(lab, np.array([1]), 3)
+    held = colocation._dilate_labeled_array(lab, np.array([1]), 3, mask=mask)
+    assert (held == 1).sum() < (free == 1).sum()
+    assert not ((held == 1) & ~mask & (lab != 1)).any()
+
+
+def test_the_mask_never_drops_a_fronts_own_pixels():
+    """Hole-filled pixels are not in the threshold map; they must still count."""
+    lab = np.zeros((20, 20), np.int32)
+    lab[10, 5:15] = 1
+    mask = np.zeros((20, 20), bool)           # excludes the front itself
+    held = colocation._dilate_labeled_array(lab, np.array([1]), 2, mask=mask)
+    assert (held == 1).sum() == int((lab == 1).sum())
+
+
+def test_masked_statistics_ignore_pixels_outside_the_mask():
+    lab = np.zeros((20, 20), np.int32)
+    lab[10, 5:15] = 1
+    field = np.ones((20, 20)); field[13, :] = 1000.0     # 3 px away
+    mask = np.zeros((20, 20), bool); mask[9:12, :] = True
+    out = colocation.colocate_fronts_with_properties(
+        lab, {'p': field}, stats=['max'], dilation_radius=3,
+        front_pixel_mask=mask)
+    assert out.loc[0, 'p_max'] == 1.0
+
+
+def test_cross_band_includes_neighbouring_fronts():
+    """The whole point of the second pass: it is not a partition."""
+    lab, core = _pair()
+    field = np.ones((40, 40))
+    field[lab == 2] = 1000.0                  # marker on the neighbour
+    out = colocation.cross_front_properties(
+        lab, core, {'p': field}, np.array([1, 2]), 1, 8, stats=['max'])
+    assert out.loc[0, 'p_max'] == 1000.0      # front 1 saw front 2
+
+
+def test_cross_band_excludes_the_fronts_own_core():
+    lab, core = _pair()
+    field = np.ones((40, 40))
+    field[core == 1] = -5.0                   # marker on front 1's own band
+    out = colocation.cross_front_properties(
+        lab, core, {'p': field}, np.array([1]), 1, 8, stats=['min'])
+    assert out.loc[0, 'p_min'] == 1.0         # the -5 never reached it
+
+
+def test_cross_bands_of_two_fronts_overlap():
+    """Two fronts closer than twice the outer radius share pixels."""
+    lab, core = _pair(gap=6)
+    masks = []
+    for label in (1, 2):
+        dist = ndimage.distance_transform_edt(lab != label)
+        masks.append((dist <= 9) & (core != label))
+    assert (masks[0] & masks[1]).sum() > 0
+
+
+def test_cross_npix_counts_the_band():
+    lab, core = _pair()
+    out = colocation.cross_front_properties(
+        lab, core, {'p': np.ones((40, 40))}, np.array([1]), 1, 8)
+    dist = ndimage.distance_transform_edt(lab != 1)
+    assert out.loc[0, 'npix'] == int(((dist <= 9) & (core != 1)).sum())
+
+
+def test_cross_band_of_all_land_is_nan():
+    """nan_policy='omit' handles land; the row stays NaN rather than erroring."""
+    lab, core = _pair()
+    field = np.full((40, 40), np.nan)
+    out = colocation.cross_front_properties(
+        lab, core, {'p': field}, np.array([1]), 1, 8, stats=['mean'])
+    assert out.loc[0, 'npix'] > 0             # the band is still there
+    assert np.isnan(out.loc[0, 'p_mean'])
+
+
+def test_cross_columns_match_the_front_property_columns():
+    """Same schema, so core and surroundings are directly comparable."""
+    lab, core = _pair()
+    field = np.random.default_rng(0).random((40, 40))
+    kw = dict(stats=['mean', 'std'], percentiles=[90])
+    near = colocation.colocate_fronts_with_properties(
+        lab, {'p': field}, dilation_radius=1, **kw)
+    far = colocation.cross_front_properties(
+        lab, core, {'p': field}, np.array([1, 2]), 1, 8, **kw)
+    assert list(near.columns) == list(far.columns)

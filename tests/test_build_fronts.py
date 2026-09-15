@@ -18,7 +18,7 @@ import textwrap
 import numpy as np
 import pytest
 
-from dbof.cli import generate_global, run_all_subsets, zarr_to_netcdf
+from dbof.cli import generate_global, run_all_subsets
 from dbof.global_dataset_creation import check_existence
 from dbof.global_dataset_creation.config import default_output_folder
 from dbof.global_dataset_creation.iterations import (
@@ -30,13 +30,12 @@ from dbof.global_dataset_creation.subset_definitions import (
 
 from front_finding import buildconfig
 from front_finding.cli import build_fronts
-from front_finding.finding import io as finding_io
+from front_finding.properties import colocation
 from front_finding.finding import run as finding_run
-from front_finding.llc import io as llc_io
-from front_finding.llc import meta as llc_meta
 from front_finding.llc import source as llc_source
 from front_finding.llc import publish as llc_publish
 from front_finding.properties import run as prun
+from front_finding.store import FrontStore
 
 PIPELINES = ("SURF", "OSN", "DEPTH")
 
@@ -69,7 +68,12 @@ finding:
   config: "D"
   ice_mask_find: false
   ice_mask_props: true
+  properties_dilation_radius: 2
+  properties_stats: ["mean", "min"]
+  properties_nan_policy: "propagate"
   percentiles: [90]
+  clobber:
+    group: true
 products:
   root: "products"
 """
@@ -252,17 +256,6 @@ def test_grid_store_carries_latlon():
         assert hasattr(GlobalGridZarrReader, prop)
 
 
-def test_output_filename_requires_a_single_date():
-    """Guard rail: many dates + one output filename is an error upstream.
-
-    Exports must therefore be per-timestamp -- handing the whole
-    ``date_iterations`` list to zarr_to_netcdf raises for any config with more
-    than one date.
-    """
-    src = inspect.getsource(zarr_to_netcdf.main)
-    assert "--output-filename can only be used when converting a single" in src
-
-
 def test_date_helpers_roundtrip():
     """fronts derives its timestamps with the producer's own helpers."""
     prefix = date_to_run_id("2012-11-09 12:00:00")
@@ -304,17 +297,27 @@ class _Spy:
         return self.calls[0][0]
 
 
-@pytest.fixture(autouse=True)
-def _reset_layout():
-    """Keep the module-level run layout from leaking between tests."""
-    llc_io.clear_run_layout()
-    yield
-    llc_io.clear_run_layout()
+@pytest.fixture
+def store(tmp_path):
+    """An empty store, standing in for the one a build would create."""
+    return FrontStore.open(str(tmp_path / "fronts.zarr"), mode="w")
 
 
 @pytest.fixture
 def spies(monkeypatch, tmp_path):
-    """Neutralise every side-effecting call build_fronts makes."""
+    """Neutralise every side-effecting call build_fronts makes.
+
+    The store is real but lives in tmp_path; the steps that would write to it
+    are spied, so nothing lands in it unless a test does so itself.
+    """
+    # Redirect the driver's store into tmp_path.  The original has to be
+    # captured first -- patching the classmethod and then calling through the
+    # class would recurse.
+    _open = FrontStore.open.__func__
+    monkeypatch.setattr(
+        build_fronts.FrontStore, "open",
+        classmethod(lambda cls, url, mode="r", **kw: _open(
+            cls, str(tmp_path / "fronts.zarr"), mode="a")))
     order = []
     s = {
         "generate": _Spy(log=order, name="generate"),
@@ -360,10 +363,10 @@ def test_step1_builds_only_the_gradb2_subset(spies, surf_cfg):
 
 
 def test_step1_generate_writes_into_this_builds_directory(spies, surf_cfg):
-    """netcdf_base matches step 4's, so the two agree on where products live."""
+    """The generate base matches step 4's, so the two agree on where to work."""
     build_fronts.run(surf_cfg, ['gradb2'])
     args, _ = spies["generate"].calls[0]
-    assert args[1] == llc_io.run_root("V5test")      # .../Fronts/V5/SURF
+    assert args[1] == surf_cfg.products_root         # .../V5/SURF
 
 
 def test_step1_asks_only_about_the_channel_it_reads(spies, surf_cfg):
@@ -453,6 +456,82 @@ def test_step4_covers_every_subset_and_colocates(spies, surf_cfg):
     kw = spies["generate"].kwargs
     assert "subsets" not in kw or kw["subsets"] is None   # -> all active_subsets
     assert len(spies["colocate"].calls) == 2              # one per date
+
+
+def test_step4_passes_the_configured_properties_dilation_radius(spies, surf_cfg):
+    """The sampling band is a config knob; the default used to be unreachable."""
+    build_fronts.run(surf_cfg, ['colocate'])
+    for _, kwargs in spies["colocate"].calls:
+        assert kwargs["properties_dilation_radius"] == 2      # _SURF_YAML, not the default
+
+
+def test_clobber_reaches_every_step_that_supports_it(spies, surf_cfg):
+    """Each step's clobber comes from the config, not a hardcoded literal."""
+    build_fronts.run(surf_cfg, ['find', 'group', 'colocate', 'push'])
+    assert spies["find"].calls[0][1]["clobber"] is False      # unset -> False
+    assert spies["group"].calls[0][1]["clobber"] is True      # from the YAML
+    assert spies["colocate"].calls[0][1]["clobber"] is False  # was hardcoded True
+    assert spies["push"].kwargs["clobber"] is False
+
+
+def test_step4_passes_the_configured_stats_and_nan_policy(spies, surf_cfg):
+    """Both were unreachable from the config before; assert the whole path."""
+    build_fronts.run(surf_cfg, ['colocate'])
+    kwargs = spies["colocate"].calls[0][1]
+    assert kwargs["stats"] == ["mean", "min"]
+    assert kwargs["nan_policy"] == "propagate"
+
+
+def test_skew_is_configurable(tmp_path):
+    path = tmp_path / "run.yaml"
+    path.write_text(_SURF_YAML.replace('["mean", "min"]', '["mean", "skew"]'))
+    assert buildconfig.load_config(str(path)).finding.properties_stats == [
+        "mean", "skew"]
+
+
+def test_unknown_stat_is_rejected_by_name(tmp_path):
+    path = tmp_path / "run.yaml"
+    path.write_text(_SURF_YAML.replace('["mean", "min"]', '["mean", "kurtosis"]'))
+    with pytest.raises(ValueError, match="kurtosis"):
+        buildconfig.load_config(str(path))
+
+
+def test_an_empty_stats_list_is_rejected(tmp_path):
+    """[] is falsy, so it would otherwise pass and compute nothing."""
+    path = tmp_path / "run.yaml"
+    path.write_text(_SURF_YAML.replace('["mean", "min"]', '[]'))
+    with pytest.raises(ValueError, match="empty"):
+        buildconfig.load_config(str(path))
+
+
+def test_every_supported_stat_is_computable():
+    """The config advertises the list; colocation has to be able to honour it."""
+    for stat in buildconfig.SUPPORTED_STATS:
+        if stat == 'count':
+            continue                      # taken straight from npix
+        assert stat in colocation._NANFUNC, stat
+        assert stat in colocation._PLAINFUNC, stat
+
+
+def test_bad_nan_policy_is_rejected_by_the_config(tmp_path):
+    path = tmp_path / "run.yaml"
+    path.write_text(_SURF_YAML.replace('"propagate"', '"sometimes"'))
+    with pytest.raises(ValueError, match="properties_nan_policy"):
+        buildconfig.load_config(str(path))
+
+
+def test_clobber_rejects_a_step_that_cannot_be_clobbered(tmp_path):
+    path = tmp_path / "run.yaml"
+    path.write_text(_SURF_YAML.replace("    group: true", "    gradb2: true"))
+    with pytest.raises(ValueError, match="gradb2"):
+        buildconfig.load_config(str(path))
+
+
+def test_clobber_rejects_a_non_boolean(tmp_path):
+    path = tmp_path / "run.yaml"
+    path.write_text(_SURF_YAML.replace("    group: true", "    group: yes-please"))
+    with pytest.raises(ValueError, match="true/false"):
+        buildconfig.load_config(str(path))
 
 
 def test_step4_generates_but_never_exports(spies, surf_cfg):
@@ -552,6 +631,11 @@ def test_load_config_merges_defaults_with_the_yaml(surf_cfg, depth_cfg):
     assert surf_cfg.date_prefixes == ["20121109_120000", "20121110_060000"]
     assert surf_cfg.finding.config == "D"          # from the YAML
     assert surf_cfg.finding.percentiles == [90]    # from the YAML
+    assert surf_cfg.finding.properties_dilation_radius == 2   # from the YAML
+    assert surf_cfg.finding.properties_stats == ["mean", "min"]      # from the YAML
+    assert surf_cfg.finding.properties_nan_policy == "propagate"     # from the YAML
+    assert depth_cfg.finding.properties_stats is None    # FindingConfig default
+    assert depth_cfg.finding.properties_nan_policy == "omit"
     assert surf_cfg.finding.suffix == "sfc"        # FindingConfig default
     assert surf_cfg.finding.exclude_roots == []    # FindingConfig default
 
@@ -575,20 +659,20 @@ def _spy_read(monkeypatch):
 
 
 def _neuter_find(monkeypatch, tmp_path):
-    llc_io.set_fronts_path(str(tmp_path / "F"))
+    """Skip the detector itself; this is about what reaches read_channel."""
     monkeypatch.setattr(finding_run.finding_algorithms, "fronts_from_gradb2",
-                        lambda arr, **kw: np.zeros_like(arr, dtype=bool))
-    monkeypatch.setattr(finding_run.finding_io, "save_binary_fronts",
-                        lambda *a, **k: None)
+                        lambda arr, **kw: (np.zeros_like(arr, dtype=bool),
+                                           np.zeros_like(arr, dtype=bool)))
+    return FrontStore.open(str(tmp_path / "icemask.zarr"), mode="w")
 
 
 def test_find_reads_unmasked_by_default(monkeypatch, tmp_path, depth_cfg):
     """depth_cfg has no finding: block at all."""
     spy = _spy_read(monkeypatch)
-    _neuter_find(monkeypatch, tmp_path)
+    store = _neuter_find(monkeypatch, tmp_path)
     finding_run.find_gradb2_fronts(
-        depth_cfg, depth_cfg.timestamps[0], "D", depth_cfg.run_id,
-        gradb2_field="gradb2_sfc", gradb2_subset="frontal_structure")
+        depth_cfg, store, depth_cfg.timestamps[0], depth_cfg.date_prefixes[0],
+        "D", gradb2_field="gradb2_sfc", gradb2_subset="frontal_structure")
     assert spy.calls[0][1]["ice_mask"] is False
 
 
@@ -600,9 +684,9 @@ def test_find_honours_ice_mask_find(monkeypatch, tmp_path):
                                   "ice_mask_find: true")),
         build_version=build_fronts.BUILD_VERSION)
     spy = _spy_read(monkeypatch)
-    _neuter_find(monkeypatch, tmp_path)
+    store = _neuter_find(monkeypatch, tmp_path)
     finding_run.find_gradb2_fronts(
-        cfg, cfg.timestamps[0], "D", cfg.run_id,
+        cfg, store, cfg.timestamps[0], cfg.date_prefixes[0], "D",
         gradb2_field="gradb2", gradb2_subset="frontal_structure")
     assert spy.calls[0][1]["ice_mask"] is True
 
@@ -752,415 +836,173 @@ def test_generate_global_dataset_builds_the_right_command(monkeypatch, surf_cfg)
 
 
 # ===========================================================================
-#  Output layout
+#  Where the store lives
 # ===========================================================================
 
-def test_layout_splits_directory_from_filename_tag(tmp_path):
-    """Products sit under the build; filenames name the source dataset."""
-    llc_io.set_fronts_path(str(tmp_path / "Fronts"))
-    llc_io.set_run_layout("V5/SURF", file_tag="v2_2_01")
-
-    path = finding_io.binary_filename("2011-12-04T00_00_00", "D", "v2_2_01")
-    assert path == str(tmp_path / "Fronts" / "V5" / "SURF" / "20111204_000000"
-                       / "LLC4320_2011-12-04T00_00_00_v2_2_01_bfronts.npy")
+def test_store_sits_under_the_build_and_pipeline(surf_cfg):
+    """One store per build; the path carries the build and the pipeline."""
+    assert surf_cfg.store_url.endswith("V5/SURF/fronts.zarr")
+    assert surf_cfg.store_url.startswith(surf_cfg.products.root)
 
 
-def test_layout_applies_to_the_binary_fronts_file(tmp_path):
-    llc_io.set_fronts_path(str(tmp_path / "Fronts"))
-    llc_io.set_run_layout("V5/SURF", file_tag="v2_2_01")
-    path = finding_io.binary_filename("2011-12-04T00_00_00", "D", "v2_2_01")
-    assert os.path.dirname(path).endswith("V5/SURF/20111204_000000")
-    assert os.path.basename(path) == \
-        "LLC4320_2011-12-04T00_00_00_v2_2_01_bfronts.npy"
+def test_two_builds_of_one_source_do_not_collide(tmp_path):
+    """build_version separates products; the source run_id does not."""
+    a = buildconfig.load_config(_write(tmp_path, "a.yaml", _SURF_YAML),
+                                build_version="V5")
+    b = buildconfig.load_config(_write(tmp_path, "b.yaml", _SURF_YAML),
+                                build_version="V6")
+    assert a.store_url != b.store_url
+    assert a.run_id == b.run_id
 
 
-def test_run_root_is_the_level_above_the_timestamps(tmp_path):
-    llc_io.set_fronts_path(str(tmp_path / "Fronts"))
-    llc_io.set_run_layout("V5/SURF", file_tag="v2_2_01")
-    root = llc_io.run_root("v2_2_01")
-    assert root == str(tmp_path / "Fronts" / "V5" / "SURF")
-    assert llc_io.fronts_dir("v2_2_01", "2011-12-04T00_00_00").startswith(root)
+def test_two_sources_share_a_store(tmp_path):
+    """Same build, different source dataset -> same store, distinct attrs.
 
-
-def test_without_a_layout_the_version_drives_both(tmp_path):
-    """Callers that never set a layout keep the flat run_id/ directory."""
-    llc_io.set_fronts_path(str(tmp_path / "Fronts"))
-    path = finding_io.binary_filename("2011-12-04T00_00_00", "D", "V4")
-    assert path == str(tmp_path / "Fronts" / "V4" / "20111204_000000"
-                       / "LLC4320_2011-12-04T00_00_00_V4_bfronts.npy")
-
-
-def test_driver_sets_the_layout_from_the_config(spies, surf_cfg, tmp_path):
-    build_fronts.run(surf_cfg, ['gradb2'])
-    assert llc_io.run_root("V5test").endswith("products/V5/SURF")
-
-
-# ===========================================================================
-#  The label map written by step 3 is the one step 4 reads
-# ===========================================================================
-
-def test_label_map_tag_matches_between_group_and_colocate(tmp_path):
-    """Both sides derive the run tag from the binary-fronts filename.
-
-    group_fronts names its outputs after the .npy it was handed; colocate must
-    resolve the same name or the label map is never found.
+    The run_id is recorded in the store's attributes rather than smuggled into
+    filenames, so nothing has to be parsed back out later.
     """
-    from front_finding.properties import algorithms as prop_algorithms
-    from front_finding.properties import io as properties_io
-
-    llc_io.set_fronts_path(str(tmp_path / "Fronts"))
-    llc_io.set_run_layout("V5/SURF", file_tag="v2_2_01")
-
-    fronts_file = finding_io.binary_filename("2011-12-04T00_00_00", "D",
-                                             "v2_2_01")
-    time_str, run_tag, _ = prop_algorithms._parse_fronts_filename(fronts_file)
-    assert run_tag == "v2_2_01_bfronts"
-
-    written = properties_io.get_global_front_output_path(
-        tmp_path, time_str, "label_map", run_tag)
-    assert written.name == \
-        "labeled_fronts_global_20111204T00_00_00_v2_2_01_bfronts.npy"
+    for run_id in ("v2_2_01", "v2_2_02"):
+        cfg = buildconfig.load_config(
+            _write(tmp_path, f"{run_id}.yaml",
+                   _SURF_YAML.replace('run_id: "V5test"', f'run_id: "{run_id}"')),
+            build_version="V5")
+        store = FrontStore.open(str(tmp_path / f"{run_id}.zarr"), mode="w")
+        store.set_build_attrs(run_id=cfg.run_id,
+                              build_version=cfg.finding.build_version)
+        assert store.attrs["run_id"] == run_id
 
 
 # ===========================================================================
-#  Pushing products back to S3
+#  The steps hand off through the store
 # ===========================================================================
 
-def test_s3_prefix_lands_beside_the_source_stores(surf_cfg, tmp_path):
+def test_group_refuses_to_run_before_find(surf_cfg, store):
+    with pytest.raises(RuntimeError, match="Run the 'find' step first"):
+        prun.group_fronts(surf_cfg, store, surf_cfg.timestamps[0],
+                          surf_cfg.date_prefixes[0])
+
+
+def test_colocate_refuses_to_run_before_group(surf_cfg, store):
+    with pytest.raises(RuntimeError, match="Run the 'group' step first"):
+        prun.colocate_fronts(surf_cfg, store, surf_cfg.timestamps[0],
+                             surf_cfg.date_prefixes[0], property_names=["gradb2"])
+
+
+def test_a_step_is_skipped_once_done(spies, surf_cfg, tmp_path):
+    """find is a no-op the second time, without clobber."""
+    date = surf_cfg.date_prefixes[0]
+    store = FrontStore.open(str(tmp_path / "s.zarr"), mode="w")
+    store.write_binary(date, np.zeros((8, 8), dtype=bool))
+
+    monkeypatch_free = _Spy()
+    finding_run.find_gradb2_fronts(
+        surf_cfg, store, surf_cfg.timestamps[0], date, "D",
+        gradb2_field="gradb2", gradb2_subset="frontal_structure")
+    assert spies["read"].calls == []          # never read the field
+
+
+def test_an_interrupted_step_is_not_treated_as_done(store):
+    """Arrays without a completion marker mean re-run, not skip."""
+    store.write_raster("20111204_000000", "binary",
+                       np.zeros((8, 8), dtype=bool))
+    assert store.has("20111204_000000", "find") is False
+    assert store.status().iloc[0]["find"] == "partial"
+    assert store.pending("find") == ["20111204_000000"]
+
+
+# ===========================================================================
+#  Publishing the store
+# ===========================================================================
+
+def test_store_publishes_beside_the_source_stores(surf_cfg):
+    prefix = llc_publish.store_s3_prefix(surf_cfg)
+    assert prefix == ("dbof/surface_fields/V5test/Fronts/V5/SURF/fronts.zarr")
+
+
+def test_publish_prefix_follows_the_store_folder(tmp_path):
     cfg = buildconfig.load_config(_write(
-        tmp_path, "src.yaml",
+        tmp_path, "elsewhere.yaml",
         _SURF_YAML.replace('    bucket: "dbof/"',
                            '    bucket: "dbof/"\n'
-                           '    folder: "globals_for_cutouts/"')))
-    prefix = llc_publish.fronts_s3_prefix(cfg, "2011-12-04T00_00_00")
-    assert prefix == "dbof/globals_for_cutouts/V5test/20111204_000000/Fronts"
+                           '    folder: "globals_for_cutouts/"')),
+        build_version="V5")
+    assert llc_publish.store_s3_prefix(cfg).startswith(
+        "dbof/globals_for_cutouts/V5test/Fronts/")
 
 
-def test_only_front_products_are_listed(tmp_path):
-    d = tmp_path / "ts"
-    d.mkdir()
-    for name in ("LLC4320_2011-12-04T00_00_00_v2_2_01_bfronts.npy",
-                 "labeled_fronts_global_20111204T00_00_00_v2_2_01_bfronts.npy",
-                 "front_index_20111204T00_00_00_v2_2_01_bfronts.parquet",
-                 "global_front_geometry_20111204T00_00_00_v2_2_01_bfronts.parquet",
-                 "front_properties_20111204T00_00_00_v2_2_01_bfronts.parquet",
-                 "metadata_20111204T00_00_00_v2_2_01_bfronts.json",
-                 "LLC4320_2011-12-04T00_00_00_gradb2_v2_2_01.nc",   # excluded
-                 "scratch.txt"):                                     # excluded
-        (d / name).touch()
+def test_pushing_one_snapshot_carries_the_root_metadata(surf_cfg, tmp_path):
+    """A published snapshot must be readable, which needs the root group."""
+    store = FrontStore.open(str(tmp_path / "s.zarr"), mode="w")
+    for date in surf_cfg.date_prefixes:
+        store.write_binary(date, np.zeros((8, 8), dtype=bool))
 
-    found = [os.path.basename(f) for f in llc_publish.list_products(str(d))]
-    assert len(found) == 6
-    assert not any(f.endswith(".nc") for f in found)
-    assert "scratch.txt" not in found
+    files = llc_publish.store_files(store.url, surf_cfg.date_prefixes[0])
+    rels = [rel for _, rel in files]
+    assert any(os.sep not in r for r in rels)                    # root metadata
+    assert all(surf_cfg.date_prefixes[1] not in r for r in rels)  # only one date
 
 
-def test_push_ignores_a_co_tenant_dataset(tmp_path):
-    """Two datasets share the directory; each push must carry only its own.
-
-    Every product name embeds the file tag, so the S3 prefix for one run never
-    receives the other run's files.
-    """
-    d = tmp_path / "ts"
-    d.mkdir()
-    for name in ("LLC4320_2011-12-04T00_00_00_v2_2_01_bfronts.npy",
-                 "front_index_20111204T00_00_00_v2_2_01_bfronts.parquet",
-                 "LLC4320_2011-12-04T00_00_00_v2_00_2_bfronts.npy",
-                 "front_index_20111204T00_00_00_v2_00_2_bfronts.parquet",
-                 "LLC4320_2011-12-04T00_00_00_v2_2_012_bfronts.npy"):
-        (d / name).touch()
-
-    mine = [os.path.basename(f)
-            for f in llc_publish.list_products(str(d), file_tag="v2_2_01")]
-    assert len(mine) == 2
-    assert all("_v2_2_01_" in f for f in mine)
-    assert not any("v2_2_012" in f for f in mine)     # not a prefix match
-    assert len(llc_publish.list_products(str(d), file_tag="v2_00_2")) == 2
-    assert len(llc_publish.list_products(str(d))) == 5   # unfiltered
-
-
-def test_push_uploads_products_and_skips_existing(monkeypatch, tmp_path):
-    cfg = buildconfig.load_config(_write(
-        tmp_path, "src.yaml",
-        _SURF_YAML.replace('    bucket: "dbof/"',
-                           '    bucket: "dbof/"\n'
-                           '    folder: "globals_for_cutouts/"')))
-    llc_io.set_fronts_path(str(tmp_path / "Fronts"))
-    llc_io.set_run_layout("V5/SURF", file_tag="v2_2_01")
-    ts = "2011-12-04T00_00_00"
-    d = llc_io.fronts_dir("v2_2_01", ts, generate=True)
-    open(os.path.join(d, f"LLC4320_{ts}_v2_2_01_bfronts.npy"), "w").close()
-    open(os.path.join(d, f"LLC4320_{ts}_gradb2_v2_2_01.nc"), "w").close()
-    open(os.path.join(d, f"LLC4320_{ts}_v2_00_2_bfronts.npy"), "w").close()
+def test_push_skips_chunks_already_uploaded(surf_cfg, tmp_path):
+    """Chunks are immutable; root metadata is refreshed every time."""
+    store = FrontStore.open(str(tmp_path / "s.zarr"), mode="w")
+    date = surf_cfg.date_prefixes[0]
+    store.write_binary(date, np.zeros((8, 8), dtype=bool))
 
     class _FS:
-        def __init__(self, existing=()):
-            self.put_calls = []
-            self.existing = set(existing)
+        def __init__(self):
+            self.put_calls, self.have = [], set()
 
         def exists(self, key):
-            return key in self.existing
+            return key in self.have
 
-        def put(self, local, key):
-            self.put_calls.append((local, key))
+        def put(self, path, key):
+            self.put_calls.append(key)
+            self.have.add(key)
 
     fs = _FS()
-    out = llc_publish.push_timestamp(cfg, ts, "v2_2_01", fs=fs)
-    # the .nc is not pushed, and neither is the co-tenant's .npy
-    assert len(fs.put_calls) == 1
-    local, key = fs.put_calls[0]
-    assert key == ("dbof/globals_for_cutouts/V5test/20111204_000000/Fronts/"
-                   f"LLC4320_{ts}_v2_2_01_bfronts.npy")
-    assert out == [f"s3://{key}"]
+    llc_publish.push_timestamp(surf_cfg, store, date, fs=fs)
+    first = len(fs.put_calls)
+    assert first > 1
 
-    fs2 = _FS(existing={key})
-    llc_publish.push_timestamp(cfg, ts, "v2_2_01", fs=fs2)
-    assert fs2.put_calls == []                         # skipped
-    llc_publish.push_timestamp(cfg, ts, "v2_2_01", fs=fs2, clobber=True)
-    assert len(fs2.put_calls) == 1                     # clobber forces it
+    llc_publish.push_timestamp(surf_cfg, store, date, fs=fs)
+    again = fs.put_calls[first:]
+    assert all(os.sep not in k.split("fronts.zarr/")[-1] for k in again)
 
 
-def test_step5_pushes_every_timestamp(spies, surf_cfg):
-    build_fronts.run(surf_cfg, ['push'])
-    args, kwargs = spies["push"].calls[0]
-    assert args[1] == ["2012-11-09T12_00_00", "2012-11-10T06_00_00"]
-    assert kwargs["version"] == "V5test"
+def test_push_does_nothing_for_a_remote_store(surf_cfg):
+    class _Remote:
+        url = "s3://dbof/somewhere/fronts.zarr"
+    assert llc_publish.push_timestamp(surf_cfg, _Remote(), "20111204_000000") == []
+
+
+def test_step5_publishes_the_store(spies, surf_cfg):
+    build_fronts.run(surf_cfg, ["push"])
+    assert len(spies["push"].calls) == 1
     assert spies["read"].calls == []                   # push only
 
 
 # ===========================================================================
-#  The run descriptor
+#  Build provenance lives in the store, not a sidecar file
 # ===========================================================================
 
-def test_meta_filename_names_its_source():
-    name = llc_meta.meta_filename("V5", "SURF", "globals_for_cutouts/",
-                                  "v2_2_01")
-    assert name == "fronts_meta_V5_SURF_from_globals_for_cutouts_v2_2_01.meta"
+def test_the_driver_records_what_made_the_products(spies, surf_cfg, tmp_path):
+    build_fronts.run(surf_cfg, ["find"])
+    attrs = FrontStore.open(str(tmp_path / "fronts.zarr")).attrs
+    assert attrs["build_version"] == "V5"
+    assert attrs["pipeline"] == "SURF"
+    assert attrs["run_id"] == "V5test"
+    assert attrs["finding_config"] == "D"
+    assert attrs["gradb2_channel"] == "gradb2"
+    assert attrs["source_folder"] == surf_cfg.source.raw.get("output", {}).get(
+        "folder", surf_cfg.source.folder)
+    assert len(attrs["dates"]) == 2
 
 
-def test_meta_is_written_at_the_run_root_and_is_readable(tmp_path):
-    import yaml as _yaml
-    cfg_path = _write(
-        tmp_path, "src.yaml",
-        _SURF_YAML.replace('    bucket: "dbof/"',
-                           '    bucket: "dbof/"\n'
-                           '    folder: "globals_for_cutouts/"'))
-    llc_io.set_fronts_path(str(tmp_path / "Fronts"))
-    llc_io.set_run_layout("V5/SURF", file_tag="V5test")
-
-    cfg = buildconfig.load_config(cfg_path)
-    path = llc_meta.write_run_meta(cfg,
-                                   extra={"gradb2_channel": "gradb2",
-                                          "gradb2_subset": "frontal_structure"})
-    assert os.path.dirname(path).endswith("V5/SURF")
-    assert os.path.basename(path) == \
-        "fronts_meta_V5_SURF_from_globals_for_cutouts_V5test.meta"
-
-    doc = _yaml.safe_load(open(path))
-    assert doc["build"]["pipeline"] == "SURF"
-    assert doc["source"]["folder"] == "globals_for_cutouts/"
-    assert doc["source"]["run_id"] == "V5test"
-    assert "globals_for_cutouts" in doc["source"]["store_uri"]
-    assert doc["fronts"]["gradb2_channel"] == "gradb2"
-    assert doc["fronts"]["finding_config"] == "D"
-    assert doc["fronts"]["ice_mask_props"] is True
-    assert doc["dates"]["n"] == 2
-    assert set(doc["code"]) == {"front_finding_git", "dbof_git"}
-
-
-def test_step1_writes_the_descriptor(spies, surf_cfg):
-    build_fronts.run(surf_cfg, ['gradb2'])
-    root = llc_io.run_root("V5test")
-    metas = [f for f in os.listdir(root) if f.endswith(".meta")]
-    assert metas == ["fronts_meta_V5_SURF_from_surface_fields_V5test.meta"]
-
-
-# ===========================================================================
-#  Generalising across pipelines and naming schemes
-# ===========================================================================
-
-_DEPTH_VX_YAML = """
-source:
-  pipeline: "DEPTH"
-  run:
-    run_id: "V5"
-  data:
-    date_iterations:
-      - '2012-11-09 12:00:00'
-  output:
-    bucket: "dbof/"
-  active_subsets: [frontal_structure, stratification, icearea]
-  depth_suffixes: [sfc, z25m]
-finding:
-  build_version: "V5"
-  config: "D"
-  suffix: "sfc"
-products:
-  root: "products"
-"""
-
-_SURF_DOTTED_YAML = """
-source:
-  pipeline: "SURF"
-  run:
-    run_id: "v2_00_2"
-  data:
-    date_iterations:
-      - '2012-11-09 12:00:00'
-  output:
-    bucket: "dbof/"
-    folder: "globals_for_cutouts/"
-  active_subsets: [frontal_structure, icearea]
-finding:
-  build_version: "v2_00"
-  config: "A"
-products:
-  root: "products"
-"""
-
-
-def _paths_for(cfg_path, tmp_path):
-    """Every path a run touches, resolved without any I/O."""
-    from dbof.global_dataset_creation.config import default_output_folder
-    from dbof.global_dataset_creation.zarr_dataset_global import make_run_prefix
-
-    cfg = buildconfig.load_config(cfg_path)
-    llc_io.set_fronts_path(str(tmp_path / "Fronts"))
-    llc_io.set_run_layout(cfg.run_dir, file_tag=cfg.run_id)
-
-    channel = prun.channel_for_root(cfg, cfg.finding.gradb2_root,
-                                    depth_suffix=cfg.finding.suffix)
-    subset = prun.subset_for_channel(cfg, channel)
-    folder = cfg.source.folder
-    ts = cfg.timestamps[0]
-    return cfg, {
-        "channel": channel,
-        "store": make_run_prefix(cfg.source.bucket, folder, cfg.run_id,
-                                 f"{subset}.zarr",
-                                 date_prefix=cfg.date_prefixes[0]),
-        "bfronts": finding_io.binary_filename(ts, cfg.finding.config,
-                                              cfg.run_id),
-        "push": "s3://" + llc_publish.fronts_s3_prefix(cfg, ts),
-        "meta": llc_meta.meta_filename(cfg.finding.build_version, cfg.pipeline,
-                                       folder, cfg.run_id),
-    }
-
-
-def test_depth_pipeline_with_vx_naming(tmp_path):
-    """DEPTH, run_id == build_version, folder from the pipeline default."""
-    cfg_path = _write(tmp_path, "depth_vx.yaml", _DEPTH_VX_YAML)
-    cfg, p = _paths_for(cfg_path, tmp_path)
-
-    assert cfg.run_dir == "V5/DEPTH"
-    assert p["channel"] == "gradb2_sfc"                  # suffixed on DEPTH
-    assert p["store"] == \
-        "s3://dbof/depth_fields/V5/20121109_120000/frontal_structure.zarr"
-    assert p["bfronts"].endswith(
-        "Fronts/V5/DEPTH/20121109_120000/"
-        "LLC4320_2012-11-09T12_00_00_V5_bfronts.npy")
-    assert p["push"] == "s3://dbof/depth_fields/V5/20121109_120000/Fronts"
-    assert p["meta"] == "fronts_meta_V5_DEPTH_from_depth_fields_V5.meta"
-
-
-def test_surf_pipeline_with_dotted_naming(tmp_path):
-    """A run_id full of underscores, and a folder that is not the default."""
-    cfg_path = _write(tmp_path, "surf_dotted.yaml", _SURF_DOTTED_YAML)
-    cfg, p = _paths_for(cfg_path, tmp_path)
-
-    assert cfg.run_dir == "v2_00/SURF"
-    assert p["channel"] == "gradb2"                      # bare on SURF
-    assert p["store"] == ("s3://dbof/globals_for_cutouts/v2_00_2/"
-                          "20121109_120000/frontal_structure.zarr")
-    assert p["bfronts"].endswith(
-        "Fronts/v2_00/SURF/20121109_120000/"
-        "LLC4320_2012-11-09T12_00_00_v2_00_2_bfronts.npy")
-    assert p["push"] == ("s3://dbof/globals_for_cutouts/v2_00_2/"
-                         "20121109_120000/Fronts")
-    assert p["meta"] == \
-        "fronts_meta_v2_00_SURF_from_globals_for_cutouts_v2_00_2.meta"
-
-
-def test_underscored_run_id_survives_the_filename_parser(tmp_path):
-    """A run_id like 'v2_00_2' must round-trip out of the .npy filename.
-
-    group_fronts and colocate both recover the run tag by parsing the binary
-    fronts filename, so an underscore-heavy tag must not be truncated.
-    """
-    from front_finding.properties import algorithms as prop_algorithms
-
-    llc_io.set_fronts_path(str(tmp_path / "Fronts"))
-    llc_io.set_run_layout("v2_00/SURF", file_tag="v2_00_2")
-    fronts_file = finding_io.binary_filename("2012-11-09T12_00_00", "A",
-                                             "v2_00_2")
-    time_str, run_tag, raw = prop_algorithms._parse_fronts_filename(fronts_file)
-    assert run_tag == "v2_00_2_bfronts"
-    assert time_str == "2012-11-09T12:00:00"
-    assert raw == "2012-11-09T12_00_00"
-
-
-def test_build_version_comes_from_the_driver_not_the_config(tmp_path):
-    """The output directory is a property of the code that made the products.
-
-    A config may name any dataset; everything build_fronts writes still lands
-    under V5/, so the layout cannot drift between runs or between people.
-    """
-    cfg_path = _write(tmp_path, "claims_otherwise.yaml",
-                      _SURF_DOTTED_YAML.replace('build_version: "v2_00"',
-                                                'build_version: "SOMETHING_ELSE"'))
-    cfg = buildconfig.load_config(cfg_path, build_version=build_fronts.BUILD_VERSION)
-    assert build_fronts.BUILD_VERSION == "V5"
-    assert cfg.run_dir == "V5/SURF"
-    assert cfg.run_id == "v2_00_2"             # the source is still recorded
-
-
-def test_driver_run_dir_is_the_same_for_every_source(spies, tmp_path):
-    for run_id in ("v2_2_01", "v2_00_2"):
-        cfg = _write(tmp_path, f"{run_id}.yaml",
-                     _SURF_YAML.replace('run_id: "V5test"', f'run_id: "{run_id}"'))
-        build_fronts.run(buildconfig.load_config(cfg,
-        build_version=build_fronts.BUILD_VERSION), ['gradb2'])
-        assert llc_io.run_root(run_id).endswith("products/V5/SURF")
-
-
-def test_two_source_datasets_do_not_overwrite_each_other(tmp_path):
-    """Same build + pipeline, different run_id -> distinct filenames.
-
-    They share a directory; the filename tag is what keeps them apart.
-    """
-    llc_io.set_fronts_path(str(tmp_path / "Fronts"))
-    names = []
-    for run_id in ("v2_2_01", "v2_2_02"):
-        llc_io.set_run_layout("V5/SURF", file_tag=run_id)
-        names.append(finding_io.binary_filename("2012-11-09T12_00_00", "D",
-                                                run_id))
-    a, b = names
-    assert os.path.dirname(a) == os.path.dirname(b)           # shared dir
-    assert a != b                                             # distinct files
-
-
-def test_every_pipeline_resolves_a_full_path_set(tmp_path):
-    """Smoke: SURF, OSN and DEPTH all resolve end to end.
-
-    The store the products are pushed to is always the store they were read
-    from, whether the folder came from the pipeline default or a YAML override.
-    """
-    from dbof.global_dataset_creation.config import default_output_folder
-
-    for pipeline in PIPELINES:
-        body = _DEPTH_VX_YAML if pipeline == "DEPTH" else _SURF_DOTTED_YAML
-        body = body.replace('pipeline: "DEPTH"', f'pipeline: "{pipeline}"')
-        body = body.replace('pipeline: "SURF"', f'pipeline: "{pipeline}"')
-        cfg_path = _write(tmp_path, f"{pipeline}.yaml", body)
-        cfg, p = _paths_for(cfg_path, tmp_path)
-        folder = cfg.source.folder.strip("/")
-
-        assert cfg.pipeline == pipeline
-        assert p["channel"].startswith("gradb2")
-        assert p["meta"].startswith(
-            f"fronts_meta_{cfg.finding.build_version}_{pipeline}_from_{folder}_")
-        # read-from and push-to share a prefix: same bucket, folder, run_id, date
-        assert p["store"].startswith(f"s3://dbof/{folder}/{cfg.run_id}/")
-        assert p["push"] == (f"s3://dbof/{folder}/{cfg.run_id}/"
-                             f"{cfg.date_prefixes[0]}/Fronts")
-        # local products stay under this build, never under the source run_id
-        assert f"/{cfg.run_dir}/" in p["bfronts"]
+def test_each_step_records_its_own_parameters(store):
+    date = "20111204_000000"
+    store.write_binary(date, np.zeros((8, 8), dtype=bool), config="D",
+                       gradb2_channel="gradb2")
+    a = store.step_attrs(date, "find")
+    assert a["config"] == "D" and a["gradb2_channel"] == "gradb2"
+    assert a["n_front_px"] == 0
+    assert a["done"]                                   # timestamped on write

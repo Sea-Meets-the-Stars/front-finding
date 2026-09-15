@@ -85,9 +85,45 @@ finding:
   ice_mask_find:  false
   ice_mask_props: false
 
+  # Pixels each front is dilated by before its properties are sampled, so the
+  # statistics describe a band around the front rather than the skeleton
+  # itself.  0 samples the front pixels alone.
+  properties_dilation_radius: 2
+
+  # Statistics per co-located channel.  Omit for mean/std/median.
+  properties_stats: ["mean", "std", "median"]
+
+  # 'omit' drops NaN, 'propagate' lets one NaN pixel make a front's whole
+  # statistic NaN.  The fields carry NaN over land.
+  properties_nan_policy: "omit"
+
+  # Thickness beyond that band, described separately in the store's
+  # cross_properties table.  0 skips it.  Unlike the band above, this region
+  # may overlap neighbouring fronts -- it describes the front's surroundings.
+  properties_cross_front_radius: 8
+
+  # Restrict the band above to pixels the threshold flagged, so it follows the
+  # gradient ridge's real width instead of a disc.  Needs binary_unprocessed in
+  # the store.  The cross-front band stays unmasked and absorbs what is dropped.
+  dilate_only_to_front_pixels: true
+
   percentiles: [25, 75, 90]
 
   exclude_roots: []
+
+  # Keep the threshold output as the store's binary_unprocessed raster --
+  # front pixels before sharpening, thinning, cropping and spur removal narrow
+  # them.  Denser than binary, so it costs proportionally more on disk.
+  save_unprocessed_binary: true
+
+  # Redo a step even though the store already records it as done.  A step not
+  # listed here is skipped when done.  gradb2 is not clobberable: whether a
+  # source store needs rebuilding is dbof's existence check to make.
+  clobber:
+    find: true
+    group: true
+    colocate: true
+    push: false
 
 # ===========================================================================
 # products -- where this build writes.

@@ -29,7 +29,7 @@ Not to be confused with :mod:`front_finding.finding.config`, which loads the
 """
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import os
 import tempfile
@@ -42,9 +42,17 @@ from dbof.global_dataset_creation.iterations import (
 )
 from dbof.global_dataset_creation.subset_definitions import valid_subsets
 
+#: Statistics the colocate step can compute per channel.
+SUPPORTED_STATS = frozenset(['mean', 'std', 'median', 'min', 'max', 'count',
+                             'skew'])
 
 #: Pipeline steps, in execution order.
 STEPS = ('gradb2', 'find', 'group', 'colocate', 'push')
+
+#: Steps that can be forced to redo work already recorded as done.  'gradb2'
+#: is absent: whether a source store needs rebuilding is dbof's existence
+#: check to make, not this repo's.
+CLOBBERABLE_STEPS = ('find', 'group', 'colocate', 'push')
 
 
 @dataclass(frozen=True)
@@ -161,10 +169,39 @@ class FindingConfig:
     ice_mask_find: bool = False
     #: Mask the property fields the fronts are co-located with (colocate step).
     ice_mask_props: bool = False
+    #: Pixels each front is dilated by before its property statistics are
+    #: taken, so they describe a band around the front rather than the
+    #: skeleton itself.  0 samples the front pixels alone.  Affects the
+    #: colocate step only -- the stored geometry is untouched.
+    properties_dilation_radius: int = 1
+    #: Statistics per co-located channel; see SUPPORTED_STATS.  None keeps
+    #: colocation's own default of mean/std/median.
+    properties_stats: Optional[List[str]] = None
+    #: How co-location treats NaN: 'omit' drops it, 'propagate' lets one NaN
+    #: pixel make the whole front's statistic NaN.  The fields carry NaN over
+    #: land.
+    properties_nan_policy: str = 'omit'
+    #: Thickness beyond that band described separately, as the store's
+    #: cross_properties table.  0 skips it.  This one may overlap neighbouring
+    #: fronts -- it is the front's surroundings, not the front.
+    properties_cross_front_radius: int = 0
+    #: Restrict the front's own band to pixels the threshold flagged, so it
+    #: follows the gradient ridge rather than a disc.  Needs the store's
+    #: binary_unprocessed raster.  The cross-front band stays unmasked and
+    #: absorbs whatever the band gives up.
+    dilate_only_to_front_pixels: bool = False
     #: Extra percentile columns per co-located channel, beyond mean/std/median.
     percentiles: List[int] = field(default_factory=lambda: [25, 75, 90])
     #: Property roots to leave out of co-location.
     exclude_roots: List[str] = field(default_factory=list)
+    #: Keep the threshold output alongside the finished front map, as the
+    #: store's binary_unprocessed raster.  Denser than binary and costs
+    #: proportionally more on disk.  Defaults on: the pipeline wants it, while
+    #: fronts_from_gradb2 itself still defaults to returning one array.
+    save_unprocessed_binary: bool = True
+    #: Per-step overwrite, keyed by step name.  A step not named here skips
+    #: work the store already records as done; see CLOBBERABLE_STEPS.
+    clobber: Dict[str, bool] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -206,10 +243,19 @@ class BuildJobConfig:
     def date_prefixes(self) -> List[str]:
         return self.source.date_prefixes
 
+    def clobber(self, step: str) -> bool:
+        """Whether *step* should redo work the store already records as done."""
+        return bool(self.finding.clobber.get(step, False))
+
     @property
     def products_root(self) -> str:
         """Directory holding this build's products: ``{root}/{run_dir}``."""
         return os.path.join(self.products.root, self.run_dir)
+
+    @property
+    def store_url(self) -> str:
+        """The build's zarr store -- every product this run writes."""
+        return os.path.join(self.products_root, 'fronts.zarr')
 
     @property
     def run_dir(self) -> str:
@@ -278,6 +324,49 @@ def load_config(path: str, build_version: str = None,
             f"Valid keys: {sorted(FindingConfig.__dataclass_fields__)}"
         )
     finding = FindingConfig(**finding_raw)
+    bad = set(finding.clobber) - set(CLOBBERABLE_STEPS)
+    if bad:
+        raise ValueError(
+            f"Unknown step(s) in the 'finding.clobber:' block of {path}: "
+            f"{sorted(bad)}.  Clobberable steps: {list(CLOBBERABLE_STEPS)}."
+        )
+    non_bool = {k: v for k, v in finding.clobber.items()
+                if not isinstance(v, bool)}
+    if non_bool:
+        raise ValueError(
+            f"'finding.clobber' values must be true/false in {path}, got "
+            f"{non_bool}."
+        )
+    if finding.properties_cross_front_radius < 0:
+        raise ValueError(
+            f"'finding.properties_cross_front_radius' must be >= 0 in {path}, "
+            f"got {finding.properties_cross_front_radius}.  0 skips the "
+            f"cross-front pass."
+        )
+    if finding.properties_dilation_radius < 0:
+        raise ValueError(
+            f"'finding.properties_dilation_radius' must be >= 0 in {path}, "
+            f"got {finding.properties_dilation_radius}.  Co-location treats "
+            f"anything below 1 as no dilation, so a negative value silently "
+            f"means 0."
+        )
+    unknown_stats = set(finding.properties_stats or ()) - SUPPORTED_STATS
+    if unknown_stats:
+        raise ValueError(
+            f"Unknown stat(s) in 'finding.properties_stats' of {path}: "
+            f"{sorted(unknown_stats)}.  Supported: {sorted(SUPPORTED_STATS)}."
+        )
+    if finding.properties_stats is not None and not finding.properties_stats:
+        raise ValueError(
+            f"'finding.properties_stats' is empty in {path}.  Omit the key to "
+            f"take colocation's default; an empty list would co-locate every "
+            f"channel and compute nothing from it."
+        )
+    if finding.properties_nan_policy not in ('omit', 'propagate'):
+        raise ValueError(
+            f"'finding.properties_nan_policy' must be 'omit' or 'propagate' "
+            f"in {path}, got {finding.properties_nan_policy!r}."
+        )
     if build_version:
         finding = replace(finding, build_version=build_version)
 

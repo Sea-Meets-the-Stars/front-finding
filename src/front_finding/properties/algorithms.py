@@ -7,51 +7,17 @@ front_finding.finding.algorithms — file I/O and path setup live in the caller
 (build_v1.py); this module handles the pure processing.
 """
 
-import re
 import numpy as np
 import pandas as pd
 
 from multiprocessing import cpu_count, get_context
-from pathlib import Path
 
-from front_finding.properties import group_labels, io, geometry, colocation
+from front_finding.properties import group_labels, geometry
 
 
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
-
-def _parse_fronts_filename(fronts_file: str):
-    """
-    Extract time_str and run_tag from a fronts filename.
-
-    Expected pattern: LLC4320_YYYY-MM-DDTHH_MM_SS_{run_tag}.npy
-    e.g. 'LLC4320_2012-11-09T12_00_00_v1_bin_A.npy'
-      -> time_str = '2012-11-09T12:00:00'
-      -> run_tag  = 'v1_bin_A'
-
-    Returns
-    -------
-    time_str : str
-        ISO 8601 timestamp with colons restored.
-    run_tag : str
-        Everything after the timestamp and before .npy, e.g. 'v1_bin_A'.
-    timestamp_raw : str
-        Timestamp as it appears in the filename (underscores, not colons),
-        e.g. '2012-11-09T12_00_00'. Used to build property filenames.
-    """
-    fname = str(fronts_file)
-    match = re.search(r'(\d{4}-\d{2}-\d{2}T\d{2}_\d{2}_\d{2})_(.+?)\.npy', fname)
-    if not match:
-        raise ValueError(
-            f"Could not parse timestamp and run_tag from fronts_file: {fronts_file}\n"
-            "Expected pattern: *_YYYY-MM-DDTHH_MM_SS_{run_tag}.npy"
-        )
-    timestamp_raw = match.group(1)                      # '2012-11-09T12_00_00'
-    time_str      = timestamp_raw.replace('_', ':')     # '2012-11-09T12:00:00'
-    run_tag       = match.group(2)                      # 'v1_bin_A'
-    return time_str, run_tag, timestamp_raw
-
 
 # ---------------------------------------------------------------------------
 # Module-level globals for copy-on-write sharing across forked workers.
@@ -111,13 +77,13 @@ def group_fronts(
     fronts_binary: np.ndarray,
     lat: np.ndarray,
     lon: np.ndarray,
-    fronts_file: str,
-    output_dir: str,
+    timestamp: str,
     n_workers: int = None,
     skip_curvature: bool = False,
-) -> pd.DataFrame:
-    """
-    Label connected front components and compute geometric properties in parallel.
+):
+    """Label connected front components and measure each one, in parallel.
+
+    Computes only; the caller persists what comes back.
 
     Parameters
     ----------
@@ -125,12 +91,9 @@ def group_fronts(
         2D binary front field (True/1 = front pixel).
     lat, lon : np.ndarray
         2D coordinate grids, same shape as fronts_binary.
-    fronts_file : str
-        Path to the source .npy file. Used to extract the timestamp for
-        output filenames and front IDs (expects YYYY-MM-DDTHH_MM_SS pattern).
-    output_dir : str
-        Directory where labeled array, group table, properties parquet,
-        and metadata JSON are saved.
+    timestamp : str
+        Snapshot timestamp, ``YYYY-MM-DDTHH_MM_SS``.  Goes into each front's
+        ID and its ``time`` column.
     n_workers : int, optional
         Parallel workers. Defaults to CPU count.
     skip_curvature : bool, optional
@@ -138,39 +101,41 @@ def group_fronts(
 
     Returns
     -------
+    labeled : np.ndarray
+        Integer label array, same shape as *fronts_binary*; 0 is background.
     df : pd.DataFrame
-        Per-front geometric properties table (also saved as parquet).
+        One row per front: label, name, time, npix, bbox, centroid, length_km,
+        orientation, num_branches, curvature.
     """
     global _GLOBAL_LABELED, _GLOBAL_LAT, _GLOBAL_LON
 
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
     n_workers = n_workers or cpu_count()
 
-    time_str, run_tag, _ = _parse_fronts_filename(fronts_file)
-
-    # --- Label ---
-    labeled, n = group_labels.label_fronts(fronts_binary, connectivity=2, return_num=True)
+    labeled, n = group_labels.label_fronts(fronts_binary, connectivity=2,
+                                           return_num=True)
     print(f"Labeled {n:,} fronts")
-    np.save(io.get_global_front_output_path(output_dir, time_str, 'label_map', run_tag), labeled)
 
-    # --- Properties (bbox + centroid indices) and front IDs ---
     properties = group_labels.get_front_properties(labeled)
-    front_ids  = group_labels.generate_front_ids(lat, lon, str(fronts_file),
-                                                 properties=properties)
+    front_ids = group_labels.generate_front_ids(lat, lon, timestamp,
+                                                properties=properties)
 
-    # --- Front index ---
-    front_index_file = io.get_global_front_output_path(output_dir, time_str, 'front_index', run_tag)
-    group_df = io.write_front_index(front_ids, properties, front_index_file)
+    # bbox per front, so each worker slices only its own window
+    index = pd.DataFrame([
+        {'label': int(lbl), 'name': name,
+         'y0': int(properties[lbl]['bbox'][0]), 'x0': int(properties[lbl]['bbox'][1]),
+         'y1': int(properties[lbl]['bbox'][2]), 'x1': int(properties[lbl]['bbox'][3])}
+        for lbl, name in front_ids.items() if lbl in properties
+    ])
 
-    # --- Parallel geometric properties ---
     _GLOBAL_LABELED = labeled
     _GLOBAL_LAT     = lat
     _GLOBAL_LON     = lon
 
+    time_str = timestamp.replace('_', ':')
     front_args = [
-        (row.label, row.name, row.y0, row.y1, row.x0, row.x1, time_str, skip_curvature)
-        for row in group_df.itertuples()
+        (row.label, row.name, row.y0, row.y1, row.x0, row.x1, time_str,
+         skip_curvature)
+        for row in index.itertuples()
     ]
     chunksize = max(100, len(front_args) // (n_workers * 10))
 
@@ -182,7 +147,6 @@ def group_fronts(
         ]
     print(f"Processed {len(results):,} fronts")
 
-    # --- Save geometry parquet ---
     df = pd.DataFrame(results)
     col_order = ['label', 'name', 'time', 'npix',
                  'y0', 'y1', 'x0', 'x1',
@@ -192,140 +156,4 @@ def group_fronts(
                  'mean_curvature', 'curvature_direction']
     df = df[[c for c in col_order if c in df.columns]]
 
-    parquet_file = io.get_global_front_output_path(output_dir, time_str, 'geometry', run_tag)
-    df.to_parquet(parquet_file, index=False)
-    print(f"Wrote: {parquet_file}")
-
-    # --- Save metadata JSON ---
-    from datetime import datetime
-    metadata = {
-        'fronts_file':              str(fronts_file),
-        'run_tag':                  run_tag,
-        'time':                     time_str,
-        'shape':                    list(fronts_binary.shape),
-        'num_fronts':               len(df),
-        'n_workers':                n_workers,
-        'skip_curvature':           skip_curvature,
-        'lat_range':                [float(lat.min()), float(lat.max())],
-        'lon_range':                [float(lon.min()), float(lon.max())],
-        'timestamp':                datetime.now().isoformat(),
-    }
-    metadata_file = io.get_global_front_output_path(output_dir, time_str, 'metadata', run_tag)
-    io.write_json(metadata, metadata_file)
-
-    return df
-
-
-def colocate_fronts(
-    labeled: np.ndarray,
-    property_names: list,
-    read_array,
-    fronts_file: str,
-    output_dir: str,
-    stats: list = None,
-    percentiles: list = None,
-    min_npix: int = 1,
-    nan_policy: str = 'omit',
-    dilation_radius: int = 0,
-    version: str = None,
-) -> pd.DataFrame:
-    """
-    Co-locate labeled fronts with property fields and save per-front statistics.
-
-    Wraps colocation.colocate_fronts_with_properties() with file I/O,
-    parallel to how group_fronts() wraps group_labels and geometry.
-
-    Fields are obtained by calling ``read_array(name)``, so this knows nothing
-    about where they come from -- the caller decides.  ``version`` (the run_id)
-    is used verbatim in the output tag.  If not given it falls back to the
-    run_id embedded in the
-    fronts_file run_tag.
-
-    Parameters
-    ----------
-    labeled : np.ndarray
-        Integer label array from group_fronts() (0 = background).
-    property_names : list of str
-        Names of property fields to co-locate, e.g.
-        ['relative_vorticity', 'strain_n', 'frontogenesis_tendency'].
-    read_array : callable
-        ``read_array(name) -> np.ndarray`` returning one field, same shape as
-        *labeled*.  Keeps this function independent of where fields live.
-    fronts_file : str
-        Path to the source binary fronts .npy file.  Timestamp and version
-        (e.g. 'v1') are extracted from it and used for the output filenames.
-    output_dir : str
-        Directory where the colocation parquet is saved.
-    stats : list, optional
-        Statistics to compute per property. Any of 'mean', 'std', 'median',
-        'min', 'max', 'count'. Defaults to ['mean', 'std', 'median'].
-    percentiles : list, optional
-        Percentiles to compute per property, e.g. [10, 25, 75, 90].
-    min_npix : int, optional
-        Minimum front size (pixels) to include. Default 1.
-    nan_policy : {'omit', 'propagate'}, optional
-        How to handle NaN values (e.g. land pixels). Default 'omit'.
-    dilation_radius : int, optional
-        Dilate each front by this many pixels before computing stats.
-        Useful for capturing the near-front environment. Default 0.
-
-    Returns
-    -------
-    df : pd.DataFrame
-        One row per front. Columns: flabel, npix, {prop}_{stat},
-        {prop}_p{pct}. Also saved as parquet.
-    """
-
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    time_str, run_tag, timestamp_raw = _parse_fronts_filename(fronts_file)
-    if version is None:
-        # Fallback for direct callers: recover the run_id from the run_tag,
-        # which is '{run_id}_bin_{config}' (e.g. 'Vtest_bin_D' -> 'Vtest').
-        version = run_tag.rsplit('_bin_', 1)[0]
-
-    property_arrays = {}
-    for prop_name in property_names:
-        print(f"Reading {prop_name}...")
-        property_arrays[prop_name] = np.asarray(read_array(prop_name)).squeeze()
-
-    print(f"Co-locating {len(property_arrays)} properties with "
-          f"{(labeled > 0).sum():,} front pixels "
-          f"(dilation_radius={dilation_radius})...")
-
-    df = colocation.colocate_fronts_with_properties(
-        labeled_fronts=labeled,
-        properties=property_arrays,
-        stats=stats,
-        percentiles=percentiles,
-        min_npix=min_npix,
-        nan_policy=nan_policy,
-        dilation_radius=dilation_radius,
-    )
-    print(f"Co-located {len(df):,} fronts")
-
-    parquet_file = io.get_global_front_output_path(output_dir, time_str, 'properties', run_tag)
-    df.to_parquet(parquet_file, index=False)
-    print(f"Wrote: {parquet_file}")
-
-    # --- Save metadata JSON ---
-    from datetime import datetime
-    metadata = {
-        'fronts_file':      str(fronts_file),
-        'run_tag':          run_tag,
-        'time':             time_str,
-        'property_names':   property_names,
-        'stats':            stats,
-        'percentiles':      percentiles,
-        'min_npix':         min_npix,
-        'nan_policy':       nan_policy,
-        'dilation_radius':  dilation_radius,
-        'num_fronts':       len(df),
-        'timestamp':        datetime.now().isoformat(),
-    }
-    metadata_file = io.get_global_front_output_path(output_dir, time_str, 'metadata_properties', run_tag)
-    io.write_json(metadata, metadata_file)
-    print(f"Wrote: {metadata_file}")
-
-    return df
+    return labeled, df

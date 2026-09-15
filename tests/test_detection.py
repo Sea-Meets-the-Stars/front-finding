@@ -5,6 +5,8 @@ dbof nor S3.  The contract-level tests in test_build_fronts.py cover the
 workflow around them; these cover what the algorithms actually compute.
 """
 import numpy as np
+from scipy import ndimage
+from skimage import morphology
 import pytest
 
 from front_finding.finding import algorithms, despur, pyboa, sharpen
@@ -99,6 +101,55 @@ def test_cropping_drops_objects_below_min_size():
 # ---------------------------------------------------------------------------
 #  Spur removal
 # ---------------------------------------------------------------------------
+
+def test_a_closed_front_survives_cropping():
+    """A ring is an eddy, not noise.
+
+    cropping() fills enclosed holes, and a closed front encloses one.  Fill it
+    and the following thinning collapses the ring to a point, so skimage's own
+    default of 64 px silently destroys every eddy under roughly 9 px across.
+    """
+    yy, xx = np.mgrid[-20:21, -20:21]
+    dist = np.hypot(yy, xx)
+    ring = morphology.thin((dist >= 2.5) & (dist <= 3.5))   # interior 21 px
+    assert ring.sum() >= 7
+
+    kept = morphology.thin(pyboa.cropping(ring, min_size=7, connectivity=2))
+    assert kept.sum() >= 7, 'the ring collapsed -- an eddy was destroyed'
+    assert ndimage.label(~kept)[1] > 1, 'the ring is no longer closed'
+
+
+def test_hole_filling_still_cleans_pinholes():
+    """The reason hole filling exists: a 1-px hole is threshold noise."""
+    band = np.zeros((21, 21), dtype=bool)
+    band[8:13, 4:17] = True
+    band[10, 10] = False                       # a pinhole
+    assert pyboa.cropping(band, min_size=7, connectivity=2)[10, 10]
+
+
+def test_no_front_survives_below_min_size():
+    """min_size is the final word, not just cropping's opinion.
+
+    A small closed loop passes cropping's size filter, then cropping fills its
+    hole into a solid disc and the final thinning reduces that to a single
+    pixel.  Without a size filter at the end, that 1-px component reaches the
+    output -- which is why a real run produced fronts of npix=1 under
+    min_size=7.
+    """
+    from skimage import measure
+    field = np.full((128, 128), 1e-3)
+    field[:, 100:103] = 1.0                   # a long ridge, so output is not empty
+    yy, xx = np.mgrid[0:128, 0:128]
+    dist = np.hypot(yy - 40, xx - 40)
+    field[(dist >= 3.5) & (dist <= 4.5)] = 1.0    # a loop that collapses to 1 px
+
+    out = algorithms.fronts_from_gradb2(
+        field, window=WNDW, threshold=90, thresh_mode='generic',
+        thin=True, min_size=7)
+    sizes = np.bincount(measure.label(out, connectivity=2).ravel())[1:]
+    assert sizes.size, 'the ridge should survive'
+    assert sizes.min() >= 7, f'components below min_size reached the output: {sizes}'
+
 
 def test_prune_short_spurs_removes_a_stub_and_keeps_the_spine():
     skel = np.zeros((40, 40), dtype=bool)

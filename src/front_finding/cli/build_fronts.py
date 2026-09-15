@@ -36,12 +36,12 @@ Usage
     build-fronts --config configs/run/run_v5_100_timesteps.yaml --steps find,group
 """
 import argparse
+import os
 from typing import List
 
 from front_finding import buildconfig
-from front_finding.llc import io as llc_io
-from front_finding.llc import meta as llc_meta
 from front_finding.llc import publish as llc_publish
+from front_finding.store import FrontStore
 from front_finding.finding.run import find_gradb2_fronts
 from front_finding.properties.run import (
     all_property_roots,
@@ -67,91 +67,82 @@ def _resolve_gradb2(cfg):
     return channel, subset_for_channel(cfg, channel)
 
 
-def _step_gradb2(cfg, gradb2_channel, gradb2_subset):
-    """Build any store that does not already hold gradb2.
-
-    generate_for_channels() asks only about the channels named here, so a store
-    that predates a channel added upstream counts as ready rather than being
-    rebuilt -- see its docstring for why that matters.
-
-    Nothing is exported: the later steps read the store directly.
-    """
-    wanted = {gradb2_subset: [gradb2_channel]}
-    if cfg.finding.ice_mask_find:
-        wanted['icearea'] = ['SIarea']       # the mask is read from it
-
-    generate_for_channels(cfg, llc_io.run_root(cfg.run_id), wanted,
-                          run_id=cfg.run_id)
-
-    llc_meta.write_run_meta(cfg,
-                            extra={'gradb2_channel': gradb2_channel,
-                                   'gradb2_subset': gradb2_subset})
-
-
 def _colocation_channels(cfg):
     """Build every missing store, then resolve the channels to co-locate."""
-    generate_global_dataset(cfg, llc_io.run_root(cfg.run_id),
-                            generate_only=True)
+    generate_global_dataset(cfg, cfg.products_root, generate_only=True)
     names = expand_property_roots(
         all_property_roots(cfg, exclude=cfg.finding.exclude_roots), cfg)
-    print(f'Co-locating {len(names)} channels')
+    print(f'Resolved {len(names)} channels to co-locate')
     return names
-
-
-def _step_find(cfg, timestamp, gradb2_channel, gradb2_subset):
-    find_gradb2_fronts(cfg, timestamp, cfg.finding.config, cfg.run_id,
-                       gradb2_field=gradb2_channel,
-                       gradb2_subset=gradb2_subset)
-
-
-def _step_group(cfg, timestamp):
-    group_fronts(cfg, timestamp, cfg.finding.config, cfg.run_id)
-
-
-def _step_colocate(cfg, timestamp, property_names):
-    """Sample each property field onto the fronts, straight from the stores.
-
-    skip_missing=True: co-locate whatever the stores hold rather than dying on
-    a channel whose subset was never generated.
-    """
-    colocate_fronts(cfg, timestamp, cfg.finding.config, cfg.run_id,
-                    property_names=property_names,
-                    percentiles=cfg.finding.percentiles,
-                    skip_missing=True, clobber=True)
 
 
 def run(cfg, steps):
     """Execute *steps* (already ordered and validated) for *cfg*."""
     gradb2_channel, gradb2_subset = _resolve_gradb2(cfg)
 
-    llc_io.set_fronts_path(cfg.products.root)
-    llc_io.set_run_layout(cfg.run_dir, file_tag=cfg.run_id)
+    # 'a' so a re-run adds to the build rather than discarding it; the store
+    # records what has already been done per snapshot.
+    store = FrontStore.open(cfg.store_url, mode='a')
+    store.set_build_attrs(
+        build_version=cfg.finding.build_version, pipeline=cfg.pipeline,
+        run_id=cfg.run_id, config_file=os.path.abspath(cfg.config_path),
+        source_bucket=cfg.source.bucket, source_folder=cfg.source.folder,
+        finding_config=cfg.finding.config,
+        gradb2_channel=gradb2_channel, gradb2_subset=gradb2_subset,
+        dates=list(cfg.source.date_iterations),
+    )
 
     print(f'pipeline={cfg.pipeline}  run_id={cfg.run_id}  '
           f'dates={len(cfg.timestamps)}  gradb2={gradb2_channel} '
           f'(subset={gradb2_subset})  finding_config={cfg.finding.config}')
     print(f'steps={steps}')
-    print(f'products -> {llc_io.run_root(cfg.run_id)}')
+    print(f'store -> {cfg.store_url}')
 
     if 'gradb2' in steps:
-        _step_gradb2(cfg, gradb2_channel, gradb2_subset)
+        # generate_for_channels() asks only about the channels named here, so a
+        # store that predates a channel added upstream counts as ready rather
+        # than being rebuilt.  Nothing is exported: later steps read the store.
+        wanted = {gradb2_subset: [gradb2_channel]}
+        if cfg.finding.ice_mask_find:
+            wanted['icearea'] = ['SIarea']       # the mask is read from it
+        generate_for_channels(cfg, cfg.products_root, wanted, run_id=cfg.run_id)
 
     # Resolved once for all timestamps: it builds every missing store.
     property_names = _colocation_channels(cfg) if 'colocate' in steps else None
 
     per_timestamp = [s for s in ('find', 'group', 'colocate') if s in steps]
     if per_timestamp:
-        for timestamp in cfg.timestamps:
+        for timestamp, date in zip(cfg.timestamps, cfg.date_prefixes):
             print(f'[{timestamp}]')
             if 'find' in steps:
-                _step_find(cfg, timestamp, gradb2_channel, gradb2_subset)
+                find_gradb2_fronts(cfg, store, timestamp, date,
+                                   cfg.finding.config,
+                                   gradb2_field=gradb2_channel,
+                                   gradb2_subset=gradb2_subset,
+                                   clobber=cfg.clobber('find'))
             if 'group' in steps:
-                _step_group(cfg, timestamp)
+                group_fronts(cfg, store, timestamp, date,
+                             clobber=cfg.clobber('group'))
             if 'colocate' in steps:
-                _step_colocate(cfg, timestamp, property_names)
+                # skip_missing: co-locate whatever the stores hold rather than
+                # dying on a channel whose subset was never generated.
+                colocate_fronts(
+                    cfg, store, timestamp, date,
+                    property_names=property_names,
+                    stats=cfg.finding.properties_stats,
+                    nan_policy=cfg.finding.properties_nan_policy,
+                    percentiles=cfg.finding.percentiles,
+                    properties_dilation_radius=(
+                        cfg.finding.properties_dilation_radius),
+                    properties_cross_front_radius=(
+                        cfg.finding.properties_cross_front_radius),
+                    dilate_only_to_front_pixels=(
+                        cfg.finding.dilate_only_to_front_pixels),
+                    skip_missing=True,
+                    clobber=cfg.clobber('colocate'))
 
     if 'push' in steps:
-        llc_publish.push_run(cfg, cfg.timestamps, version=cfg.run_id)
+        llc_publish.push_run(cfg, store, clobber=cfg.clobber('push'))
 
 
 # ---------------------------------------------------------------------------

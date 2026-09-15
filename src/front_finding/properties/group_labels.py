@@ -84,7 +84,7 @@ def get_front_properties(
 def generate_front_ids(
     lat: np.ndarray,
     lon: np.ndarray,
-    filename: str,
+    timestamp: str,
     properties: Dict[int, Dict] = None,
     labeled_fronts: np.ndarray = None,
 ) -> Dict[int, str]:
@@ -99,9 +99,8 @@ def generate_front_ids(
     ----------
     lat, lon : np.ndarray
         2D latitude / longitude grids, shape (H, W).
-    filename : str
-        Filename containing the timestamp in the pattern
-        YYYY-MM-DDTHH_MM_SS (e.g. 'LLC4320_2012-11-09T12_00_00_bin_A.npy').
+    timestamp : str
+        Snapshot timestamp, ``YYYY-MM-DDTHH_MM_SS``.
     properties : dict, optional
         Output of get_front_properties(). If provided, centroids are taken
         from here (avoids recomputing). One of properties or labeled_fronts
@@ -114,11 +113,10 @@ def generate_front_ids(
     front_ids : dict
         Maps integer label -> string ID, e.g. {1: '20121109T120000_35.2N_123.4W'}.
     """
-    # --- Extract time from filename ---
-    match = re.search(r'(\d{4}-\d{2}-\d{2}T\d{2}_\d{2}_\d{2})', filename)
+    match = re.search(r'(\d{4}-\d{2}-\d{2}T\d{2}_\d{2}_\d{2})', timestamp)
     if not match:
         raise ValueError(
-            f"Could not extract timestamp from filename: {filename}. "
+            f"Could not read a timestamp from {timestamp!r}.  "
             "Expected pattern: YYYY-MM-DDTHH_MM_SS"
         )
     time_str = (match.group(1)

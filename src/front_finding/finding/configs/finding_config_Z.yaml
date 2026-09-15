@@ -13,6 +13,10 @@ binary:
   thin: false                      # Apply morphological thinning to fronts
 
   # Optional fields
-  dilate: false                   # Dilate the front (usually after thin + crop)
+  dilate_radius: 0                # Dilate the front by N px; 0 disables
+  # Largest enclosed hole filled while cropping.  Also the smallest
+  # closed front (an eddy) that survives: filling a ring's interior
+  # makes the final thinning collapse it to a point.
+  hole_max_size: 4
   min_size: 0                     # Minimum size for front (pixels) - used for cropping
   connectivity: 2                 # Connectivity for morphological operations (1=4-conn, 2=8-conn)

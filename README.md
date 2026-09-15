@@ -108,27 +108,48 @@ unit-level or pins the contract with dbof.
 ```
 src/front_finding/
   buildconfig.py   typed run configuration
-  cli/         build-fronts entry point
-  finding/     detection: thresholding, sharpening, thinning, spur removal
-  llc/         product paths, run metadata, S3 publication
-  properties/  labelling, geometry, co-location
-configs/run/     run configurations
-notebooks/       worked examples against a real run
-tests/           unit, contract and integration tests
+  store.py         the zarr store every product is written to and read from
+  cli/             build-fronts entry point
+  finding/         detection: thresholding, sharpening, thinning, spur removal
+  llc/             source-field reads, S3 publication
+  properties/      labelling, geometry, co-location
+configs/run/       run configurations
+docs/store.md      the store's layout and reader API
+notebooks/         worked examples against a real run
+tests/             unit, contract and integration tests
 ```
 
 ## Outputs
 
-Products are organised by the build that made them; filenames keep the source
-`run_id`, so a file always names the dataset it came from:
+Everything a build produces is **one zarr store** — no NetCDF, no parquet, no
+metadata sidecars:
 
 ```
-$OS_OGCM/LLC/Fronts/{build_version}/{pipeline}/{date_prefix}/
-    LLC4320_{timestamp}_{channel}_{run_id}.nc      exported field
-    LLC4320_{timestamp}_{run_id}_bfronts.npy       binary front map
-    labeled_fronts_global_*.npy                    label map
-    front_index_*.parquet                          one row per front: label, name, bbox
-    global_front_geometry_*.parquet                length, orientation, curvature, branches
-    front_properties_*.parquet                     per-front property statistics
-    fronts_meta_*.meta                              run descriptor
+{products.root}/{build_version}/{pipeline}/fronts.zarr/
+├── zarr.json                    build + source provenance
+└── 20111204_000000/
+    ├── binary      (j, i) bool   front pixels                    <- find
+    ├── labels      (j, i) int32  connected components            <- group
+    ├── geometry/   per-front shape: length, orientation, bbox    <- group
+    └── properties/ per-front field statistics                    <- colocate
 ```
+
+Read it from anywhere:
+
+```python
+from front_finding.store import FrontStore
+
+store = FrontStore.open("output/TEST01/SURF/fronts.zarr")
+store.status()                    # what finished, per snapshot
+store.fronts("20111204_000000")   # one row per front
+store.labels(date, window=(y0, y1, x0, x1))   # just that crop
+store.dataset()                   # every snapshot, concatenated
+```
+
+Rasters are chunked so a window read never materialises the global grid, and
+tables are stored one array per column so reading one property does not pull
+the rest. A step is only "done" once it has written a completion marker, so an
+interrupted run is re-runnable rather than silently half-claimed.
+
+See [docs/store.md](docs/store.md) for the layout, the table columns, the
+provenance attributes, and how to port code that read the old per-file outputs.

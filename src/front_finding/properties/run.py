@@ -1,10 +1,10 @@
 """ High-level routines to run bits and pieces of front_finding.properties
 """
-import os
 import sys
 import subprocess
 
 import numpy as np
+from tqdm import tqdm
 
 from dbof.global_dataset_creation import check_existence
 from dbof.global_dataset_creation.subset_definitions import (
@@ -14,12 +14,10 @@ from dbof.global_dataset_creation.zarr_dataset_global import make_run_prefix
 from dbof.io.filesystems import create_s3_filesystems
 
 from front_finding import buildconfig
-from front_finding.finding import io as finding_io
-from front_finding.llc import io as llc_io
 from front_finding.llc import source as llc_source
 
-from front_finding.properties import io as properties_io
 from front_finding.properties import algorithms as prop_algorithms
+from front_finding.properties import colocation
 
 
 def generate_global_dataset(cfg, products_root: str,
@@ -138,56 +136,71 @@ def generate_for_channels(cfg, products_root: str,
                                 subsets=[subset], generate_only=True)
 
 
-def colocate_fronts(cfg, timestamp: str, config: str, version: str,
+def colocate_fronts(cfg, store, timestamp: str, date: str,
                     property_names: list,
-                    output_dir: str = None,
                     stats: list = None, percentiles: list = None,
                     min_npix: int = 1, nan_policy: str = 'omit',
-                    dilation_radius: int = 1, clobber: bool = False,
+                    properties_dilation_radius: int = 1,
+                    properties_cross_front_radius: int = 0,
+                    dilate_only_to_front_pixels: bool = False,
+                    clobber: bool = False,
                     skip_missing: bool = False):
-    """Co-locate labeled fronts with physical property fields.
+    """Sample the property fields onto the fronts; one row per front.
 
-    Fields are read straight from the S3 zarr stores; products are written
-    under the path set by :func:`front_finding.llc.io.set_fronts_path`.
+    Reads the label map this build's ``group`` step wrote and the fields from
+    the source zarr stores, and writes the property table back to the store.
 
     Args:
-        cfg: The resolved run config (BuildJobConfig); locates the stores.
-        timestamp (str): Snapshot timestamp, e.g. '2012-11-09T12_00_00'.
-        config (str): Front-finding config label, e.g. 'A'.
-        version (str): Data version string.
-        property_names (list): Fully-expanded channel names to co-locate,
-            e.g. ['relative_vorticity_sfc', 'strain_n_sfc'].
-        output_dir (str, optional): Output directory. Defaults to the
-            standard fronts directory for this version + timestamp.
-        stats (list, optional): Statistics to compute per property.
+        cfg: The resolved run config (BuildJobConfig); locates the source stores.
+        store: The FrontStore this build reads from and writes to.
+        timestamp (str): Snapshot timestamp, e.g. '2011-12-04T00_00_00'.
+        date (str): Snapshot group in the store, ``YYYYMMDD_HHMMSS``.
+        property_names (list): Fully-expanded channel names to co-locate.
+        stats (list, optional): Statistics per property.
             Defaults to ['mean', 'std', 'median'].
-        percentiles (list, optional): Percentiles to compute, e.g. [10, 90].
-        min_npix (int): Minimum front size in pixels. Defaults to 1.
-        nan_policy (str): 'omit' or 'propagate' NaNs. Defaults to 'omit'.
-        dilation_radius (int): Pixels to dilate each front before stats.
-        clobber (bool): Overwrite existing output. Defaults to False.
-        skip_missing (bool): Drop requested channels the store does not hold
-            instead of raising. Defaults to False (strict).
+        percentiles (list, optional): Extra percentiles, e.g. [10, 90].
+        min_npix (int): Minimum front size in pixels.
+        nan_policy (str): 'omit' drops NaN, 'propagate' lets one NaN
+            pixel make a whole front's statistic NaN.  Recorded in the
+            store, since it changes what every column means.
+        properties_dilation_radius (int): Pixels to dilate each front before
+            sampling, so the statistics cover a band rather than the skeleton.
+        properties_cross_front_radius (int): Thickness beyond that band to
+            describe separately, as a ``cross_properties`` table.  0 skips it.
+            Unlike the band, this one may overlap neighbouring fronts.
+        dilate_only_to_front_pixels (bool): Restrict the front's own band to
+            pixels the threshold flagged, so it follows the gradient ridge
+            rather than a disc.  Needs ``binary_unprocessed`` in the store.
+            The cross-front band is left unmasked and absorbs whatever the
+            band gives up.
+        clobber (bool): Redo the step even if it has already run.
+        skip_missing (bool): Drop channels the source stores do not hold
+            instead of raising.
 
     Ice masking follows ``cfg.finding.ice_mask_props``.
     """
-    fdir = llc_io.fronts_dir(version, timestamp)
-    fronts_file = finding_io.binary_filename(timestamp, config, version)
-    if output_dir is None:
-        output_dir = fdir
-
-    # The run_tag must come from the binary-fronts filename via the same parser
-    # group_fronts() used when it wrote the label map, or the two disagree and
-    # the label map is never found.
-    time_str, run_tag, _ = prop_algorithms._parse_fronts_filename(fronts_file)
-    out_file = properties_io.get_global_front_output_path(
-        output_dir, time_str, 'properties', run_tag)
-    if os.path.isfile(out_file) and not clobber:
-        print(f"Properties file {out_file} exists and clobber is False. Returning")
+    if store.has(date, 'colocate') and not clobber:
+        print(f"[{date}] already co-located; pass clobber=True to redo")
         return
+    if not store.has(date, 'group'):
+        raise RuntimeError(
+            f"[{date}] no label map in {store.url}.  Run the 'group' step first."
+        )
 
-    # Check the stores actually hold the requested channels before any heavy
-    # work -- one metadata read per subset, no field data.
+    # Fail before the channel reads, which are the expensive part.
+    front_pixel_mask = None
+    if dilate_only_to_front_pixels:
+        try:
+            front_pixel_mask = np.asarray(store.binary_unprocessed(date))
+        except KeyError:
+            raise RuntimeError(
+                f"[{date}] dilate_only_to_front_pixels needs the "
+                f"binary_unprocessed raster, which {store.url} does not have.  "
+                f"Set finding.save_unprocessed_binary and re-run the 'find' step."
+            ) from None
+
+    # Check the source stores hold the channels before any heavy work --
+    # one metadata read per subset, no field data.
     available = llc_source.available_channels(cfg, timestamp)
     missing = [name for name in property_names if name not in available]
     if missing:
@@ -205,25 +218,60 @@ def colocate_fronts(cfg, timestamp: str, config: str, version: str,
                   "co-locate. Returning.")
             return
 
-    labeled_file = properties_io.get_global_front_output_path(
-        fdir, time_str, 'label_map', run_tag)
-    labeled = np.load(labeled_file)
+    labeled = store.labels(date)[:]
 
-    prop_algorithms.colocate_fronts(
-        labeled=labeled,
-        property_names=property_names,
-        read_array=lambda ch: llc_source.read_channel(
-            cfg, timestamp, ch, subset_for_channel(cfg, ch),
-            ice_mask=cfg.finding.ice_mask_props),
-        fronts_file=fronts_file,
-        output_dir=output_dir,
-        version=version,
+    property_arrays = {}
+    reads = tqdm(property_names, desc="Reading channels", unit="ch")
+    for name in reads:
+        reads.set_postfix_str(name)
+        property_arrays[name] = np.asarray(llc_source.read_channel(
+            cfg, timestamp, name, subset_for_channel(cfg, name),
+            ice_mask=cfg.finding.ice_mask_props)).squeeze()
+
+    print(f"Co-locating {len(property_arrays)} properties with "
+          f"{(labeled > 0).sum():,} front pixels "
+          f"(properties_dilation_radius={properties_dilation_radius})...")
+    df = colocation.colocate_fronts_with_properties(
+        labeled_fronts=labeled,
+        properties=property_arrays,
         stats=stats,
         percentiles=percentiles,
         min_npix=min_npix,
         nan_policy=nan_policy,
-        dilation_radius=dilation_radius,
+        dilation_radius=properties_dilation_radius,
+        front_pixel_mask=front_pixel_mask,
     )
+    print(f"Co-located {len(df):,} fronts")
+
+    cross = None
+    if properties_cross_front_radius > 0:
+        print(f"Describing surroundings out to "
+              f"{properties_dilation_radius + properties_cross_front_radius} px "
+              f"(cross_front_radius={properties_cross_front_radius})...")
+        cross = colocation.cross_front_properties(
+            labeled_fronts=labeled,
+            core_labels=colocation._dilate_labeled_array(
+                labeled, df['flabel'].to_numpy(),
+                properties_dilation_radius, mask=front_pixel_mask),
+            properties=property_arrays,
+            flabels=df['flabel'].to_numpy(),
+            dilation_radius=properties_dilation_radius,
+            cross_front_radius=properties_cross_front_radius,
+            stats=stats,
+            percentiles=percentiles,
+            nan_policy=nan_policy,
+        )
+        print(f"Cross-front band: median {int(cross['npix'].median()):,} px "
+              f"per front")
+
+    store.write_properties(date, df, cross_properties=cross,
+                           channels=list(property_names),
+                           percentiles=percentiles,
+                           properties_dilation_radius=properties_dilation_radius,
+                           properties_cross_front_radius=properties_cross_front_radius,
+                           dilate_only_to_front_pixels=dilate_only_to_front_pixels,
+                           stats=list(stats) if stats else None,
+                           min_npix=min_npix, nan_policy=nan_policy)
 
 
 def _resolve_channel_maps(cfg):
@@ -427,31 +475,40 @@ def all_property_roots(cfg, exclude: list = None) -> list:
     return [r for r in root_to_expanded if r not in drop]
 
 
-def group_fronts(cfg, timestamp: str, config: str, version: str,
-                 n_workers: int = None, skip_curvature: bool = False):
-    """Label connected front components and compute geometric properties globally.
+def group_fronts(cfg, store, timestamp: str, date: str,
+                 n_workers: int = None, skip_curvature: bool = False,
+                 clobber: bool = False):
+    """Label connected components and measure each front's geometry.
 
-    Coordinates come from the static grid store on S3; products are written
-    under the path set by :func:`front_finding.llc.io.set_fronts_path`.
+    Reads the binary map this build's ``find`` step wrote, and writes the label
+    map and geometry table back alongside it.  Coordinates come from the static
+    grid store on S3.
 
     Args:
-        cfg: The resolved run config (BuildJobConfig); locates the grid store.
-        timestamp (str): Snapshot timestamp, e.g. '2012-11-09T12_00_00'.
-        config (str): Front-finding config label, e.g. 'A'.
-        version (str): Data version string.
+        cfg: The resolved run config (BuildJobConfig).
+        store: The FrontStore this build reads from and writes to.
+        timestamp (str): Snapshot timestamp, e.g. '2011-12-04T00_00_00'.
+        date (str): Snapshot group in the store, ``YYYYMMDD_HHMMSS``.
         n_workers (int, optional): Parallel workers. Defaults to CPU count.
         skip_curvature (bool): Skip curvature calculation (~50% faster).
+        clobber (bool): Redo the step even if it has already run.
     """
-    fronts_file = finding_io.binary_filename(timestamp, config, version)
-    output_dir = llc_io.fronts_dir(version, timestamp)
+    if store.has(date, 'group') and not clobber:
+        print(f"[{date}] fronts already grouped; pass clobber=True to redo")
+        return
+    if not store.has(date, 'find'):
+        raise RuntimeError(
+            f"[{date}] no binary front map in {store.url}.  Run the 'find' "
+            f"step first."
+        )
 
-    fronts_binary = np.load(fronts_file)
+    fronts_binary = store.binary(date)[:]
     lat, lon = llc_source.read_latlon(cfg)
 
-    prop_algorithms.     group_fronts(
-        fronts_binary, lat, lon,
-        fronts_file=fronts_file,
-        output_dir=output_dir,
-        n_workers=n_workers,
-        skip_curvature=skip_curvature,
+    labeled, geometry = prop_algorithms.group_fronts(
+        fronts_binary, lat, lon, timestamp,
+        n_workers=n_workers, skip_curvature=skip_curvature,
     )
+    store.write_group(date, labeled, geometry, skip_curvature=skip_curvature)
+
+

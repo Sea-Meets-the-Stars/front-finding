@@ -879,7 +879,8 @@ def thinning(in_array, iteration=2, f_dilate=True, min_size=7):
     # 
     return array
 
-def cropping(array, min_size:int=7, connectivity:int=2):
+def cropping(array, min_size:int=7, connectivity:int=2,
+             hole_max_size:int=4):
     """
     Process a binary array to remove spurs, small objects, and small holes.
 
@@ -893,6 +894,13 @@ def cropping(array, min_size:int=7, connectivity:int=2):
         array (numpy.ndarray): Input binary array to be processed.
         min_size (int, optional): Minimum size (in pixels) of connected components 
             to retain. Smaller components will be removed. Defaults to 7.
+        hole_max_size (int, optional): Largest enclosed hole to fill, in pixels.
+            Filling exists to close pinholes left by thresholding, which would
+            otherwise become spurious skeleton loops.  A closed front encloses
+            a hole too, so this doubles as the smallest eddy the pipeline can
+            represent: fill its interior and the following thinning collapses
+            the ring to a point.  Defaults to 4 -- skimage's own default of 64
+            destroys every closed front under roughly 9 px across.
 
     Returns:
         numpy.ndarray: Processed binary array with spurs, small objects, and small 
@@ -905,7 +913,8 @@ def cropping(array, min_size:int=7, connectivity:int=2):
     # clean small object
     frnt = morphology.remove_small_objects(
         frnt.astype(bool), min_size=min_size, connectivity=connectivity)
-    # remove small holes
-    frnt = morphology.remove_small_holes(frnt)
+    # remove small holes -- see hole_max_size, this is where eddies live or die
+    if hole_max_size > 1:
+        frnt = morphology.remove_small_holes(frnt, hole_max_size)
     # 
     return frnt

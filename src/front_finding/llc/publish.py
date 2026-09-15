@@ -1,43 +1,27 @@
-"""Push front products back to the S3 store they were derived from.
+"""Push the front store back to the S3 dataset it was derived from.
 
-Each timestamp's outputs land in a ``Fronts/`` folder alongside the zarr
-stores they came from::
+A build's products are one zarr store, so publishing copies that store to a
+``Fronts/`` prefix beside the source stores it was built from::
 
     s3://{bucket}/{folder}/{run_id}/{YYYYMMDD_HHMMSS}/frontal_structure.zarr
-    s3://{bucket}/{folder}/{run_id}/{YYYYMMDD_HHMMSS}/Fronts/
-        LLC4320_{ts}_{tag}_bfronts.npy
-        labeled_fronts_global_{ts}_{tag}_bfronts.npy
-        front_index_{ts}_{tag}_bfronts.parquet
-        global_front_geometry_{ts}_{tag}_bfronts.parquet
-        front_properties_{ts}_{tag}_bfronts.parquet
-        metadata_{ts}_{tag}_bfronts.json
+    s3://{bucket}/{folder}/{run_id}/Fronts/{build_version}/{pipeline}/fronts.zarr
 
-The S3 location is read from the same config that drove the run, so products
+The store spans every snapshot, so it sits beside the date directories rather
+than inside one, and carries the build version and pipeline in its key so two
+builds of the same source dataset cannot overwrite each other.
+
+The destination is read from the same config that drove the run, so products
 cannot land next to the wrong dataset.
-"""
-import fnmatch
-import os
-import re
 
+Snapshots publish independently: pushing one date uploads that group plus the
+store's root metadata, so a long run can publish as it goes rather than only at
+the end.
+"""
+import os
 
 from dbof.io.filesystems import create_s3_filesystems
 
-from front_finding.llc import io as llc_io
-
-
-#: Filename patterns treated as front products -- everything this build makes.
-#: Source fields are not among them: they are read straight from the zarr
-#: stores and never staged, so there is nothing of theirs to upload.
-PRODUCT_PATTERNS = (
-    '*_bfronts.npy',
-    'labeled_fronts_global_*.npy',
-    'front_index_*.parquet',
-    'global_front_geometry_*.parquet',
-    'front_properties_*.parquet',
-    'metadata_*.json',
-    'metadata_properties_*.json',
-)
-
+#: Prefix products are published under, beside the source stores.
 DEFAULT_SUBFOLDER = 'Fronts'
 
 
@@ -51,67 +35,69 @@ def _s3_settings(cfg) -> dict:
     }
 
 
-def fronts_s3_prefix(cfg, timestamp: str,
-                     subfolder: str = DEFAULT_SUBFOLDER,
-                     run_id: str = None) -> str:
-    """Return the S3 key prefix (no scheme) for one timestamp's products."""
+def store_s3_prefix(cfg, subfolder: str = DEFAULT_SUBFOLDER,
+                    run_id: str = None) -> str:
+    """The S3 key prefix (no scheme) this build's store publishes to."""
     s3 = _s3_settings(cfg)
-    date_prefix = llc_io._format_timestamp(timestamp)
     return '/'.join([s3['bucket'], s3['folder'], run_id or s3['run_id'],
-                     date_prefix, subfolder])
+                     subfolder, cfg.run_dir, 'fronts.zarr'])
 
 
-def list_products(local_dir: str, patterns: tuple = PRODUCT_PATTERNS,
-                  file_tag: str = None) -> list:
-    """Return the front-product files in *local_dir*, sorted by name.
+def _local_store_path(store) -> str:
+    """The store's directory on disk, or None if it is already remote."""
+    url = str(store.url)
+    if '://' in url and not url.startswith('file://'):
+        return None
+    return url[len('file://'):] if url.startswith('file://') else url
 
-    A directory is keyed on the build and the pipeline, so products derived
-    from two different source datasets can sit side by side.  *file_tag*
-    narrows the result to one of them -- without it, a push would carry a
-    co-tenant's files into the wrong S3 prefix.
 
-    Parameters
-    ----------
-    local_dir : str
-        Directory holding one timestamp's products.
-    patterns : tuple
-        Filename globs to match.
-    file_tag : str, optional
-        Keep only files carrying this tag, e.g. ``'v2_2_01'``.  Matched as a
-        whole underscore-delimited component, so ``'v2_2_01'`` does not also
-        select ``'v2_2_012'``.
+def store_files(store_path: str, date: str = None) -> list:
+    """Files to upload, as ``(local_path, key_suffix)`` pairs.
+
+    With *date*, that snapshot's group plus the store's root metadata -- enough
+    for the published store to be readable even when only some snapshots have
+    been pushed.  Without it, the whole store.
     """
-    if not os.path.isdir(local_dir):
+    if not os.path.isdir(store_path):
         return []
-    hits = [f for f in os.listdir(local_dir)
-            if any(fnmatch.fnmatch(f, pat) for pat in patterns)]
-    if file_tag:
-        keep = re.compile(rf'_{re.escape(file_tag)}(?=[_.])')
-        hits = [f for f in hits if keep.search(f)]
-    return sorted(os.path.join(local_dir, f) for f in hits)
+
+    roots = []
+    if date is not None:
+        # Root metadata first: a group is unreadable without it.
+        roots += [(os.path.join(store_path, f), f)
+                  for f in sorted(os.listdir(store_path))
+                  if os.path.isfile(os.path.join(store_path, f))]
+        walk_from = os.path.join(store_path, date)
+        if not os.path.isdir(walk_from):
+            return roots
+    else:
+        walk_from = store_path
+
+    out = list(roots)
+    for dirpath, _, filenames in os.walk(walk_from):
+        for name in sorted(filenames):
+            full = os.path.join(dirpath, name)
+            out.append((full, os.path.relpath(full, store_path)))
+    return out
 
 
-def push_timestamp(cfg, timestamp: str, version: str,
-                   subfolder: str = DEFAULT_SUBFOLDER,
-                   patterns: tuple = PRODUCT_PATTERNS,
+def push_timestamp(cfg, store, date: str, subfolder: str = DEFAULT_SUBFOLDER,
                    run_id: str = None, clobber: bool = False,
                    dry_run: bool = False, fs=None) -> list:
-    """Upload one timestamp's front products to S3.
+    """Upload one snapshot's group, plus the store's root metadata.
 
     Parameters
     ----------
     cfg : front_finding.buildconfig.BuildJobConfig
         The resolved run config.  Supplies the S3 endpoint, bucket, folder and
         run_id, so the destination always matches the source dataset.
-    timestamp : str
-        Snapshot timestamp, e.g. '2011-12-04T00_00_00'.
-    version : str
-        Run tag, resolved through the active layout to locate the local
-        directory (see :func:`front_finding.llc.io.set_run_layout`).
+    store : front_finding.store.FrontStore
+        The build's store.  Must be local -- there is nothing to push from a
+        store that already lives on S3.
+    date : str
+        Snapshot group, ``YYYYMMDD_HHMMSS``.
     subfolder : str
-        Folder created under the timestamp prefix.  Defaults to ``'Fronts'``.
-    patterns : tuple
-        Filename globs to upload.  Defaults to :data:`PRODUCT_PATTERNS`.
+        Prefix under the run_id.  Defaults to ``'Fronts'``.
     run_id : str, optional
         Override the destination run_id from the config.
     clobber : bool
@@ -124,53 +110,60 @@ def push_timestamp(cfg, timestamp: str, version: str,
     Returns
     -------
     list of str
-        ``s3://`` URIs that now hold this timestamp's products.
+        ``s3://`` URIs now holding this snapshot's data.
     """
-    local_dir = llc_io.fronts_dir(version, timestamp)
-    files = list_products(local_dir, patterns,
-                          file_tag=llc_io._resolve_file_tag(version))
-    if not files:
-        print(f"  no front products in {local_dir} — nothing to push")
+    store_path = _local_store_path(store)
+    if store_path is None:
+        print(f"  store is already remote ({store.url}) — nothing to push")
         return []
 
-    prefix = fronts_s3_prefix(cfg, timestamp, subfolder, run_id)
+    files = store_files(store_path, date)
+    if not files:
+        print(f"  nothing for {date} in {store_path} — nothing to push")
+        return []
+
+    prefix = store_s3_prefix(cfg, subfolder, run_id)
     if fs is None and not dry_run:
         _, fs = create_s3_filesystems(_s3_settings(cfg)['s3_endpoint'])
 
-    written = []
-    for path in files:
-        key = f"{prefix}/{os.path.basename(path)}"
+    written, skipped = [], 0
+    for path, rel in files:
+        key = f"{prefix}/{rel}"
         uri = f"s3://{key}"
         if dry_run:
-            print(f"  [DRY RUN] {path} -> {uri}")
             written.append(uri)
             continue
-        if not clobber and fs.exists(key):
-            print(f"  SKIP (exists)  {uri}")
+        # Root metadata is rewritten as snapshots are added, so it always goes
+        # up; chunks are immutable once written and can be skipped.
+        is_root = os.sep not in rel
+        if not clobber and not is_root and fs.exists(key):
+            skipped += 1
             written.append(uri)
             continue
-        print(f"  PUT  {os.path.basename(path)} -> {uri}")
         fs.put(path, key)
         written.append(uri)
+
+    verb = '[DRY RUN] would upload' if dry_run else 'uploaded'
+    print(f"  {verb} {len(written) - skipped} file(s)"
+          + (f", skipped {skipped} already present" if skipped else ""))
     return written
 
 
-def push_run(cfg, timestamps: list, version: str,
-             subfolder: str = DEFAULT_SUBFOLDER,
-             patterns: tuple = PRODUCT_PATTERNS,
-             run_id: str = None, clobber: bool = False,
-             dry_run: bool = False) -> list:
-    """Upload every timestamp's front products, reusing one S3 connection."""
+def push_run(cfg, store, dates: list = None,
+             subfolder: str = DEFAULT_SUBFOLDER, run_id: str = None,
+             clobber: bool = False, dry_run: bool = False) -> list:
+    """Publish the store, one snapshot at a time, over one S3 connection."""
+    dates = list(dates) if dates is not None else store.dates
     fs = None
     if not dry_run:
         _, fs = create_s3_filesystems(_s3_settings(cfg)['s3_endpoint'])
 
+    print(f"Publishing to s3://{store_s3_prefix(cfg, subfolder, run_id)}")
     written = []
-    for timestamp in timestamps:
-        print(f"[{timestamp}]")
+    for date in dates:
+        print(f"[{date}]")
         written.extend(push_timestamp(
-            cfg, timestamp, version, subfolder=subfolder,
-            patterns=patterns, run_id=run_id, clobber=clobber,
-            dry_run=dry_run, fs=fs))
-    print(f"Pushed {len(written)} file(s) across {len(timestamps)} timestamp(s)")
+            cfg, store, date, subfolder=subfolder, run_id=run_id,
+            clobber=clobber, dry_run=dry_run, fs=fs))
+    print(f"Pushed {len(written)} file(s) across {len(dates)} snapshot(s)")
     return written

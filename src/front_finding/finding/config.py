@@ -24,10 +24,15 @@ finding_dmodel = {
                     help='Remove spurs from fronts'),
         'Lspur': dict(dtype=(int, np.integer),
                     help='Maximum spur length in pixels (measured as branch-distance)'),
-        'dilate': dict(dtype=bool,
-                    help='Dilate the front?  Usually after thin + crop'),
+        'dilate_radius': dict(dtype=(int, np.integer),
+                    help='Dilate the front by this many pixels; 0 disables.  '
+                         'Usually after thin + crop'),
         'min_size': dict(dtype=(int, np.integer),
                     help='Minimum size for front (pixels). Used for cropping'),
+        'hole_max_size': dict(dtype=(int, np.integer),
+                    help='Largest enclosed hole to fill during cropping '
+                         '(pixels).  Also the smallest closed front -- an '
+                         'eddy -- that survives; <=1 disables filling'),
         'connectivity': dict(dtype=(int, np.integer),
                     help='??'),
     },

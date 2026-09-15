@@ -1,10 +1,10 @@
-"""Integration test: fields in memory -> binary fronts -> groups -> per-front table.
+"""Integration test: fields in memory -> fronts -> groups -> per-front table.
 
-Runs the real find / group / colocate stages against a synthetic field on a
-temporary filesystem.  Only the S3 boundary is stubbed -- ``read_channel`` and
-``read_latlon`` return arrays instead of fetching them.  Everything below that
-is the production code path, so a break in the filename conventions that tie
-the three stages together shows up here.
+Runs the real find / group / colocate stages against a synthetic field, writing
+to a real zarr store in tmp_path.  Only the S3 boundary is stubbed --
+``read_channel`` and ``read_latlon`` return arrays instead of fetching them.
+Everything below that is the production code path, so a break in how the three
+stages hand off through the store shows up here.
 """
 import os
 import textwrap
@@ -13,12 +13,10 @@ import numpy as np
 import pytest
 
 from front_finding import buildconfig
-from front_finding.finding import io as finding_io
 from front_finding.finding import run as finding_run
-from front_finding.llc import io as llc_io
 from front_finding.llc import source as llc_source
-from front_finding.properties import io as properties_io
 from front_finding.properties import run as prun
+from front_finding.store import FrontStore
 
 TIMESTAMP = '2011-12-04T00_00_00'
 RUN_ID = 'itest'
@@ -85,23 +83,16 @@ def run_cfg(tmp_path, monkeypatch):
         monkeypatch.setattr(mod, 'available_channels',
                             lambda cfg_, ts: set(CHANNELS))
 
-    llc_io.clear_run_layout()
-    llc_io.set_fronts_path(cfg.products.root)
-    llc_io.set_run_layout(cfg.run_dir, file_tag=cfg.run_id)
-    yield cfg
-    llc_io.clear_run_layout()
+    yield cfg, FrontStore.open(cfg.store_url, mode='w')
 
 
-def _find(cfg):
+DATE = '20111204_000000'
+
+
+def _find(cfg, store):
     finding_run.find_gradb2_fronts(
-        cfg, TIMESTAMP, FINDING_CONFIG, cfg.run_id,
+        cfg, store, TIMESTAMP, DATE, FINDING_CONFIG,
         gradb2_field='gradb2', gradb2_subset='frontal_structure')
-
-
-def _product(kind):
-    return properties_io.get_global_front_output_path(
-        llc_io.fronts_dir(RUN_ID, TIMESTAMP), TIMESTAMP.replace('_', ':'),
-        kind, f'{RUN_ID}_bfronts')
 
 
 # ---------------------------------------------------------------------------
@@ -109,27 +100,57 @@ def _product(kind):
 # ---------------------------------------------------------------------------
 
 def test_find_writes_a_binary_front_map(run_cfg):
-    _find(run_cfg)
-    path = finding_io.binary_filename(TIMESTAMP, FINDING_CONFIG, RUN_ID)
-    assert os.path.isfile(path)
-    fronts = np.load(path)
+    cfg, store = run_cfg
+    _find(cfg, store)
+    assert store.has(DATE, 'find')
+    fronts = store.binary(DATE)[:]
     assert fronts.shape == (N, N)
+    assert fronts.dtype == bool
     assert fronts.any(), 'the detector found nothing in a field with ridges'
 
 
+def test_find_keeps_the_unprocessed_threshold(run_cfg):
+    """Post-processing only narrows, so the kept mask must be the wider one."""
+    cfg, store = run_cfg
+    _find(cfg, store)
+    raw = store.binary_unprocessed(DATE)[:]
+    assert raw.shape == store.binary(DATE)[:].shape
+    assert raw.sum() > store.binary(DATE)[:].sum()
+    assert store.step_attrs(DATE, 'find')['n_unprocessed_px'] == int(raw.sum())
+
+
+def test_find_skips_the_unprocessed_raster_when_switched_off(run_cfg):
+    cfg, store = run_cfg
+    cfg = buildconfig.replace(cfg, finding=buildconfig.replace(
+        cfg.finding, save_unprocessed_binary=False))
+    _find(cfg, store)
+    assert store.has(DATE, 'find')
+    with pytest.raises(KeyError):
+        store.binary_unprocessed(DATE)
+    assert 'n_unprocessed_px' not in store.step_attrs(DATE, 'find')
+
+
 def test_find_is_idempotent_without_clobber(run_cfg):
-    _find(run_cfg)
-    path = finding_io.binary_filename(TIMESTAMP, FINDING_CONFIG, RUN_ID)
-    mtime = os.path.getmtime(path)
-    _find(run_cfg)
-    assert os.path.getmtime(path) == mtime      # skipped, not rewritten
+    cfg, store = run_cfg
+    _find(cfg, store)
+    first = store.step_attrs(DATE, 'find')['done']
+    _find(cfg, store)
+    assert store.step_attrs(DATE, 'find')['done'] == first   # skipped
 
 
-def test_products_land_under_the_configured_root(run_cfg):
-    _find(run_cfg)
-    path = finding_io.binary_filename(TIMESTAMP, FINDING_CONFIG, RUN_ID)
-    assert path.startswith(run_cfg.products.root)
-    assert f'/{run_cfg.run_dir}/' in path       # ITEST/SURF
+def test_the_store_lands_under_the_configured_root(run_cfg):
+    cfg, store = run_cfg
+    assert cfg.store_url.startswith(cfg.products.root)
+    assert f'/{cfg.run_dir}/' in cfg.store_url               # ITEST/SURF
+
+
+def test_find_records_what_it_used(run_cfg):
+    cfg, store = run_cfg
+    _find(cfg, store)
+    attrs = store.step_attrs(DATE, 'find')
+    assert attrs['config'] == FINDING_CONFIG
+    assert attrs['gradb2_channel'] == 'gradb2'
+    assert attrs['n_front_px'] == int(store.binary(DATE)[:].sum())
 
 
 # ---------------------------------------------------------------------------
@@ -138,36 +159,49 @@ def test_products_land_under_the_configured_root(run_cfg):
 
 @pytest.fixture
 def grouped(run_cfg):
-    _find(run_cfg)
-    prun.group_fronts(run_cfg, TIMESTAMP, FINDING_CONFIG, run_cfg.run_id,
-                      n_workers=1)
-    return run_cfg
+    cfg, store = run_cfg
+    _find(cfg, store)
+    prun.group_fronts(cfg, store, TIMESTAMP, DATE, n_workers=1)
+    return cfg, store
 
 
-def test_group_writes_the_label_map_and_tables(grouped):
-    for kind in ('label_map', 'front_index', 'geometry', 'metadata'):
-        assert os.path.isfile(_product(kind)), f'{kind} was not written'
+def test_group_writes_the_label_map_and_geometry(grouped):
+    cfg, store = grouped
+    assert store.has(DATE, 'group')
+    assert store.labels(DATE).shape == (N, N)
+    assert len(store.geometry(DATE)) == 3
 
 
 def test_label_map_matches_the_binary_map(grouped):
-    labeled = np.load(_product('label_map'))
-    binary = np.load(finding_io.binary_filename(TIMESTAMP, FINDING_CONFIG, RUN_ID))
+    cfg, store = grouped
+    labeled = store.labels(DATE)[:]
+    binary = store.binary(DATE)[:]
     assert labeled.shape == binary.shape
-    assert np.array_equal(labeled > 0, binary.astype(bool))
+    assert np.array_equal(labeled > 0, binary)
     assert labeled.max() == 3, 'three ridges should label as three fronts'
+    assert labeled.dtype == np.int32
 
 
 def test_geometry_table_has_one_row_per_front(grouped):
-    df = properties_io.load_front_index(_product('geometry'))
+    cfg, store = grouped
+    df = store.geometry(DATE)
     assert len(df) == 3
     for col in ('label', 'name', 'npix', 'length_km', 'orientation'):
         assert col in df.columns
     assert (df['length_km'] > 0).all()
 
 
-def test_group_takes_its_coordinates_from_the_grid_store(grouped):
+def test_geometry_column_order_survives_the_round_trip(grouped):
+    """zarr lists arrays alphabetically; the table must not be reordered."""
+    cfg, store = grouped
+    assert list(store.geometry(DATE).columns)[:4] == [
+        'label', 'name', 'time', 'npix']
+
+
+def test_group_takes_its_coordinates_from_the_grid(grouped):
     """Latitudes must span the stubbed grid, not some default."""
-    df = properties_io.load_front_index(_product('geometry'))
+    cfg, store = grouped
+    df = store.geometry(DATE)
     assert df['centroid_lat'].between(-60, 60).all()
     assert df['centroid_lon'].between(-180, 180).all()
 
@@ -178,56 +212,112 @@ def test_group_takes_its_coordinates_from_the_grid_store(grouped):
 
 def test_colocate_joins_property_fields_onto_the_fronts(grouped):
     """The stage that turns fronts into a per-front feature row."""
-    prun.colocate_fronts(grouped, TIMESTAMP, FINDING_CONFIG, grouped.run_id,
+    cfg, store = grouped
+    prun.colocate_fronts(cfg, store, TIMESTAMP, DATE,
                          property_names=CHANNELS, percentiles=[90],
-                         dilation_radius=0, clobber=True)
-
-    df = properties_io.load_front_index(_product('properties'))
+                         properties_dilation_radius=0, clobber=True)
+    df = store.properties(DATE)
     assert len(df) == 3
     for col in ('flabel', 'npix', 'gradb2_mean', 'gradb2_std',
                 'gradb2_median', 'gradb2_p90', 'turner_angle_mean'):
         assert col in df.columns
 
 
+def test_colocate_masked_to_front_pixels_records_the_flag(grouped):
+    cfg, store = grouped
+    prun.colocate_fronts(cfg, store, TIMESTAMP, DATE, property_names=['gradb2'],
+                         properties_dilation_radius=3, clobber=True,
+                         dilate_only_to_front_pixels=True)
+    assert store.step_attrs(DATE, 'colocate')['dilate_only_to_front_pixels']
+
+
+def test_colocate_masked_needs_the_unprocessed_raster(grouped):
+    cfg, store = grouped
+    del store.root[DATE]['binary_unprocessed']
+    with pytest.raises(RuntimeError, match='save_unprocessed_binary'):
+        prun.colocate_fronts(cfg, store, TIMESTAMP, DATE,
+                             property_names=['gradb2'], clobber=True,
+                             dilate_only_to_front_pixels=True)
+
+
+def test_colocate_honours_the_configured_stats(grouped):
+    cfg, store = grouped
+    prun.colocate_fronts(cfg, store, TIMESTAMP, DATE, property_names=['gradb2'],
+                         stats=['mean', 'max'], clobber=True)
+    cols = set(store.properties(DATE).columns)
+    assert {'gradb2_mean', 'gradb2_max'} <= cols
+    assert 'gradb2_median' not in cols          # not asked for
+    assert store.step_attrs(DATE, 'colocate')['stats'] == ['mean', 'max']
+
+
+def test_colocate_records_the_nan_policy_it_used(grouped):
+    cfg, store = grouped
+    prun.colocate_fronts(cfg, store, TIMESTAMP, DATE, property_names=['gradb2'],
+                         nan_policy='propagate', clobber=True)
+    assert store.step_attrs(DATE, 'colocate')['nan_policy'] == 'propagate'
+
+
+def test_colocate_reads_only_the_columns_asked_for(grouped):
+    cfg, store = grouped
+    prun.colocate_fronts(cfg, store, TIMESTAMP, DATE,
+                         property_names=CHANNELS, properties_dilation_radius=0)
+    assert list(store.properties(DATE, columns=['gradb2_mean']).columns) == [
+        'gradb2_mean']
+
+
 def test_colocate_skips_channels_the_stores_lack(grouped):
-    prun.colocate_fronts(grouped, TIMESTAMP, FINDING_CONFIG, grouped.run_id,
+    cfg, store = grouped
+    prun.colocate_fronts(cfg, store, TIMESTAMP, DATE,
                          property_names=['gradb2', 'NoSuchField'],
-                         skip_missing=True, dilation_radius=0, clobber=True)
-    df = properties_io.load_front_index(_product('properties'))
+                         skip_missing=True, properties_dilation_radius=0, clobber=True)
+    df = store.properties(DATE)
     assert 'gradb2_mean' in df.columns
     assert not any(c.startswith('NoSuchField') for c in df.columns)
 
 
 def test_colocate_raises_on_an_absent_channel_by_default(grouped):
+    cfg, store = grouped
     with pytest.raises(KeyError, match='NoSuchField'):
-        prun.colocate_fronts(grouped, TIMESTAMP, FINDING_CONFIG,
-                             grouped.run_id, property_names=['NoSuchField'],
-                             clobber=True)
+        prun.colocate_fronts(cfg, store, TIMESTAMP, DATE,
+                             property_names=['NoSuchField'], clobber=True)
 
 
 # ---------------------------------------------------------------------------
 #  The join that ties the stages together
 # ---------------------------------------------------------------------------
 
-def test_geometry_and_property_tables_describe_the_same_fronts(grouped):
+def test_fronts_joins_geometry_to_properties(grouped):
     """group writes `label`, colocate writes `flabel` -- they must agree."""
-    prun.colocate_fronts(grouped, TIMESTAMP, FINDING_CONFIG, grouped.run_id,
-                         property_names=['gradb2'], dilation_radius=0,
-                         clobber=True)
-
-    geom = properties_io.load_front_index(_product('geometry'))
-    props = properties_io.load_front_index(_product('properties'))
-
+    cfg, store = grouped
+    prun.colocate_fronts(cfg, store, TIMESTAMP, DATE,
+                         property_names=['gradb2'], properties_dilation_radius=0)
+    geom, props = store.geometry(DATE), store.properties(DATE)
     assert sorted(geom['label']) == sorted(props['flabel'])
-    merged = geom.merge(props, left_on='label', right_on='flabel')
-    assert len(merged) == len(geom)
-    assert (merged['npix_x'] == merged['npix_y']).all()
+
+    joined = store.fronts(DATE)
+    assert len(joined) == len(geom)
+    assert 'flabel' not in joined.columns          # folded into `label`
+    assert 'gradb2_mean' in joined.columns
 
 
-def test_nothing_is_staged_to_disk_but_products(grouped):
-    """No NetCDF, no coords file -- only the products themselves."""
-    written = sorted(os.listdir(llc_io.fronts_dir(RUN_ID, TIMESTAMP)))
-    assert written, 'the run wrote nothing'
-    assert not any(f.endswith('.nc') for f in written), written
-    for f in written:
-        assert f.endswith(('.npy', '.parquet', '.json')), f
+def test_fronts_returns_geometry_alone_before_colocation(grouped):
+    """A half-built store is still readable."""
+    cfg, store = grouped
+    assert not store.has(DATE, 'colocate')
+    assert list(store.fronts(DATE).columns) == list(store.geometry(DATE).columns)
+
+
+def test_dataset_spans_the_snapshots_that_are_done(grouped):
+    cfg, store = grouped
+    store.write_raster('20111206_180000', 'binary',
+                       np.zeros((8, 8), dtype=bool))   # started, not grouped
+    ds = store.dataset()
+    assert set(ds['date']) == {DATE}                   # the other is skipped
+    assert len(ds) == 3
+
+
+def test_the_store_is_the_only_thing_written(grouped):
+    """No NetCDF, no parquet sidecars, no coords file -- one store."""
+    cfg, store = grouped
+    written = sorted(os.listdir(os.path.join(cfg.products.root, cfg.run_dir)))
+    assert written == ['fronts.zarr']

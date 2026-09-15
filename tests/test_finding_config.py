@@ -154,7 +154,7 @@ class TestLoad:
                 'threshold': 90.0,
                 'thresh_mode': 'pool',
                 'thin': True,
-                'dilate': False,
+                'dilate_radius': 0,
                 'min_size': 7,
                 'connectivity': 2,
             },
@@ -162,7 +162,7 @@ class TestLoad:
         cfg_file = tmp_path / 'full.yaml'
         cfg_file.write_text(yaml.dump(data))
         cfg = config.load(str(cfg_file))
-        assert cfg['binary']['dilate'] is False
+        assert cfg['binary']['dilate_radius'] == 0
         assert cfg['binary']['min_size'] == 7
         assert cfg['binary']['connectivity'] == 2
 
