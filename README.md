@@ -93,13 +93,42 @@ build-fronts --config configs/run/run_test_single_timestep.yaml \
     --build-version TEST01 --steps gradb2,find,group
 ```
 
+## Scenes
+
+A build is global.  Crop one tile out of it -- the gradb2 field, the front map,
+and the table rows of the fronts inside it:
+
+```bash
+fronts-scene --config configs/run/small_fronts_dataset_00.yaml --tile 330 \
+    --output ./scenes --npy
+```
+
+One NetCDF.  Nothing is recomputed: a window read and a table subset, seconds.
+Labels keep their global values, so a front in a scene is the same front in the
+build.
+
+## One tile
+
+A build normally runs on the globe.  A config carrying a `source.tile:` block
+runs the same steps on one 720 x 720 tile instead -- the fields are generated a
+tile at a time, so nothing global is computed anywhere in it:
+
+```bash
+build-fronts --config configs/run/run_tile330.yaml --steps gradb2,find,group
+build-fronts --config configs/run/run_tile330.yaml --steps colocate
+```
+
+Same store, same tables, 518k pixels instead of 224M.  See
+[docs/tiles.md](docs/tiles.md), and note the caveat there about thresholding
+near a tile edge.
+
 ## Tests
 
 ```bash
 pytest -q
 ```
 
-147 tests, no network. The integration tests build a Fronts tree in a temp
+268 tests, no network. The integration tests build a Fronts tree in a temp
 directory and run the real find/group/colocate stages; everything else is
 unit-level or pins the contract with dbof.
 
@@ -109,12 +138,14 @@ unit-level or pins the contract with dbof.
 src/front_finding/
   buildconfig.py   typed run configuration
   store.py         the zarr store every product is written to and read from
+  scene.py         crop a build to one 720x720 tile
   cli/             build-fronts entry point
   finding/         detection: thresholding, sharpening, thinning, spur removal
-  llc/             source-field reads, S3 publication
+  llc/             source-field reads (global and per-tile), S3 publication
   properties/      labelling, geometry, co-location
 configs/run/       run configurations
 docs/store.md      the store's layout and reader API
+docs/tiles.md      running a build on one tile instead of the globe
 notebooks/         worked examples against a real run
 tests/             unit, contract and integration tests
 ```

@@ -32,6 +32,7 @@ dependencies = [
     "skan",
     "dask",
     "xarray",
+    "h5netcdf",
     "pyyaml",
     "tqdm",
     "pyarrow",
@@ -48,6 +49,7 @@ notebook = ["jupyter", "matplotlib"]
 
 [project.scripts]
 build-fronts = "front_finding.cli.build_fronts:main"
+fronts-scene = "front_finding.scene:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

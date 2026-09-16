@@ -10,6 +10,11 @@ them, so they were ~900 MB of write-then-read per channel for no benefit.
 
 The static grid (lat/lon) lives in its own store, unchanged across timesteps,
 so it is fetched once per process and kept in memory.
+
+A run whose config carries a ``source.tile:`` block is not global: its fields
+are single-tile NetCDFs.  The three readers below dispatch to
+:mod:`front_finding.llc.tiles` in that case, so every caller keeps one import
+and one signature whichever kind of run it is on.
 """
 import numpy as np
 
@@ -18,6 +23,8 @@ from dbof.global_dataset_creation.zarr_dataset_global import GlobalZarrDatasetRe
 from dbof.global_dataset_creation.zarr_grid_global import GlobalGridZarrReader
 from dbof.io.filesystems import create_s3_filesystems
 from dbof.preprocessing.ice_mask import apply_ice_mask, load_siarea_mask
+
+from front_finding.llc import tiles as tile_source
 
 
 #: lat/lon for the run's grid store, keyed by store path.  The grid is static
@@ -59,6 +66,10 @@ def read_channel(cfg, timestamp: str, channel: str, subset: str,
     np.ndarray
         ``(j, i)`` for the whole globe.
     """
+    if cfg.is_tile:
+        return tile_source.read_channel(cfg, timestamp, channel, subset,
+                                        ice_mask=ice_mask)
+
     date_prefix = _date_prefix(cfg, timestamp)
     dataset_name = (cfg.source.dataset_name
                     or get_subset_definition(cfg.pipeline, subset)['dataset_name'])
@@ -83,12 +94,54 @@ def read_channel(cfg, timestamp: str, channel: str, subset: str,
     return arr
 
 
+def read_channel_window(cfg, timestamp: str, channel: str, subset: str,
+                        window) -> np.ndarray:
+    """Read one channel of one snapshot over a window, straight from S3.
+
+    The store's ``data`` array is chunked, so slicing it touches only the
+    overlapping chunks -- a 720 x 720 tile costs a few MB rather than the
+    snapshot's ~900 MB.  Ice masking is not applied: the mask is a global
+    field, and a windowed read exists to avoid pulling one.
+
+    Args:
+        cfg: The resolved run config (BuildJobConfig).
+        timestamp (str): Snapshot, ``'YYYY-MM-DDTHH_MM_SS'``.
+        channel (str): Fully-expanded channel name.
+        subset (str): The subset owning *channel*.
+        window: ``(y0, y1, x0, x1)`` on the rect grid.
+
+    Returns:
+        np.ndarray: ``(y1 - y0, x1 - x0)``.
+    """
+    if cfg.is_tile:
+        raise ValueError(
+            "read_channel_window is for the global stores; a tile run's fields "
+            "are already one tile.  Read them with llc.tiles.read_channel.")
+
+    y0, y1, x0, x1 = window
+    date_prefix = _date_prefix(cfg, timestamp)
+    dataset_name = (cfg.source.dataset_name
+                    or get_subset_definition(cfg.pipeline, subset)['dataset_name'])
+    fs, _ = create_s3_filesystems(cfg.source.s3_endpoint)
+
+    reader = GlobalZarrDatasetReader(
+        bucket=cfg.source.bucket, folder=cfg.source.folder,
+        run_id=cfg.run_id, dataset_name=dataset_name, fs=fs,
+        date_prefix=date_prefix,
+    )
+    idx = reader.channel_names.index(channel)
+    return np.asarray(reader.data[idx, y0:y1, x0:x1]).squeeze()
+
+
 def available_channels(cfg, timestamp: str) -> set:
     """Every channel the run's active subsets hold for *timestamp*.
 
     Reads each store's metadata only -- no field data -- so it is cheap enough
     to call before deciding what to co-locate.
     """
+    if cfg.is_tile:
+        return tile_source.available_channels(cfg, timestamp)
+
     date_prefix = _date_prefix(cfg, timestamp)
     fs, _ = create_s3_filesystems(cfg.source.s3_endpoint)
 
@@ -116,6 +169,9 @@ def read_latlon(cfg):
     the grid does not vary with timestep, and a run touches it once per
     snapshot.  Nothing is cached to disk.
     """
+    if cfg.is_tile:
+        return tile_source.read_latlon(cfg)
+
     grid = cfg.source.grid
     key = (grid['bucket'], grid['folder'], grid['dataset_name'])
     if key not in _GRID_CACHE:
