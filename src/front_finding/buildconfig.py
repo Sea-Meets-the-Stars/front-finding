@@ -119,6 +119,17 @@ class SourceConfig:
         return list(active)
 
     @property
+    def tile(self) -> Optional[dict]:
+        """The ``tile:`` sub-block, or None for a global run.
+
+        Its presence is what puts a build in tile mode: fields come from
+        per-tile NetCDFs (:mod:`front_finding.llc.tiles`) rather than from the
+        global zarr stores, and products are 720 x 720.  dbof has no opinion
+        about this key -- it is stripped before the block is handed over.
+        """
+        return self.raw.get('tile')
+
+    @property
     def grid(self) -> dict:
         """Location of the static grid store, which carries lat/lon.
 
@@ -246,6 +257,11 @@ class BuildJobConfig:
     def clobber(self, step: str) -> bool:
         """Whether *step* should redo work the store already records as done."""
         return bool(self.finding.clobber.get(step, False))
+
+    @property
+    def is_tile(self) -> bool:
+        """Whether this run finds fronts on one tile rather than the globe."""
+        return self.source.tile is not None
 
     @property
     def products_root(self) -> str:
@@ -403,8 +419,11 @@ def materialized_source(cfg: BuildJobConfig):
     """
     fd, path = tempfile.mkstemp(prefix='dbof_source_', suffix='.yaml')
     try:
+        # 'tile' is this repo's key, not dbof's: run_all_subsets is global and
+        # would not know what to do with it.
+        block = {k: v for k, v in cfg.source.raw.items() if k != 'tile'}
         with os.fdopen(fd, 'w') as fh:
-            yaml.safe_dump(cfg.source.raw, fh, sort_keys=False,
+            yaml.safe_dump(block, fh, sort_keys=False,
                            default_flow_style=False)
         yield path
     finally:

@@ -1,0 +1,89 @@
+# ---------------------------------------------------------------------------
+# build-fronts -- ONE TILE, the whole chain.
+#
+# Tile 330 is the 720 x 720 block over the California Current / Monterey Bay
+# (rect j 9360:10080, i 12960:13680).  The same five steps as a global run,
+# each reading and writing 518k pixels instead of 224M:
+#
+#   gradb2    generate-tile the gradb2 field for every date below
+#   find      threshold it into a binary front map
+#   group     label the fronts, measure their geometry
+#   colocate  generate-tile the other channels, sample them onto the fronts
+#
+#   build-fronts --config configs/run/run_tile330.yaml --steps gradb2,find,group
+#   build-fronts --config configs/run/run_tile330.yaml --steps colocate
+#
+# 'push' does not apply: it publishes beside the global source stores, and a
+# tile run has none.
+#
+# Source is OSN, the public hourly kerchunk surface store -- the only one with
+# consecutive hourly Theta/Salt, which is what a tile time series wants.  Add
+# dates to source.data.date_iterations to extend the series; the tile is
+# resolved and its grid downloaded once for the whole run.
+# ---------------------------------------------------------------------------
+
+source:
+
+  pipeline: "OSN"
+
+  run:
+    run_id: "tile330"
+    log_dir: "./logs/"
+
+  # What makes this a tile run.  Give the tile as `index`, as a rect pixel
+  # (`i` + `j`), or geographically (`lon` + `lat`) -- the last is resolved
+  # against the grid store, so it needs network; the others are arithmetic.
+  tile:
+    index: 330
+    # lon: -121.9
+    # lat: 36.8
+    # Where the per-channel tile NetCDFs are written and read.  Relative to
+    # THIS FILE, like products.root.  One subdirectory per snapshot:
+    #   {root}/{YYYYMMDD_HHMMSS}/{channel}_tile330.nc
+    root: "../../tiles"
+    mask_land: true
+
+  # Subsets whose channels get co-located.  Only the channel list matters here
+  # -- a tile is generated per channel, so there is no store to build and
+  # nothing is charged for a subset until `colocate` asks for it.
+  active_subsets:
+    - frontal_structure   # gradb2, gradsalt2, gradtheta2, gradeta2, gradrho2,
+                          # turner_angle, density, buoyancy
+    - kinematic           # relative_vorticity, strain_*, divergence,
+                          # rossby_number, okubo_weiss, coriolis_f
+    - native_fields       # Theta, Salt, Eta, W (+ computed U, V)
+
+  data:
+    date_iterations:
+      - '2012-06-29 00:00:00'
+      - '2012-06-29 01:00:00'
+      - '2012-06-29 02:00:00'
+
+finding:
+
+  build_version: "TILE330"
+  config: "D"
+
+  gradb2_root: "gradb2"
+  suffix: "sfc"           # no effect on OSN
+
+  # Needs 'SIarea' as a tile, which the gradb2 step generates when this is set.
+  ice_mask_find:  false
+  ice_mask_props: false
+
+  properties_dilation_radius: 2
+  properties_stats: ["mean", "std", "median"]
+  properties_nan_policy: "omit"
+  properties_cross_front_radius: 8
+  dilate_only_to_front_pixels: true
+  percentiles: [25, 75, 90]
+  exclude_roots: []
+  save_unprocessed_binary: true
+
+  clobber:
+    find: false
+    group: false
+    colocate: false
+
+products:
+  root: "../../output"

@@ -319,8 +319,11 @@ class FrontStore:
         grp = self._group(date)
         if name in grp:
             del grp[name]
+        # A tile build's rasters are smaller than one global chunk; zarr would
+        # take CHUNK verbatim and record a chunk grid larger than the array.
+        chunks = tuple(min(c, n) for c, n in zip(CHUNK, arr.shape))
         z = grp.create_array(name, shape=arr.shape, dtype=arr.dtype,
-                             chunks=CHUNK)
+                             chunks=chunks)
         z[:] = arr
 
     def write_table(self, date: str, name: str, df: pd.DataFrame) -> None:

@@ -22,6 +22,11 @@ staged to disk except this build's own products.
 Data production is delegated to the preprocessing repo (``dbof``); this driver
 finds, groups and co-locates.
 
+A config carrying a ``source.tile:`` block runs the same five steps on one
+720 x 720 tile instead of the globe: fields come from ``generate-tile``
+NetCDFs, and the products land in a store of the same shape.  See
+docs/tiles.md.
+
 Products are organised by the build that made them; filenames keep the source
 run_id, so a file always names the dataset it came from::
 
@@ -41,6 +46,7 @@ from typing import List
 
 from front_finding import buildconfig
 from front_finding.llc import publish as llc_publish
+from front_finding.llc import tiles as tile_source
 from front_finding.store import FrontStore
 from front_finding.finding.run import find_gradb2_fronts
 from front_finding.properties.run import (
@@ -68,10 +74,18 @@ def _resolve_gradb2(cfg):
 
 
 def _colocation_channels(cfg):
-    """Build every missing store, then resolve the channels to co-locate."""
-    generate_global_dataset(cfg, cfg.products_root, generate_only=True)
+    """Build every missing field, then resolve the channels to co-locate.
+
+    Global: one dbof run per missing store.  Tile: one ``generate-tile`` series
+    per channel, which is the whole difference -- the same channel list, 720 x
+    720 instead of 12960 x 17280.
+    """
     names = expand_property_roots(
         all_property_roots(cfg, exclude=cfg.finding.exclude_roots), cfg)
+    if cfg.is_tile:
+        tile_source.generate(cfg, names)
+    else:
+        generate_global_dataset(cfg, cfg.products_root, generate_only=True)
     print(f'Resolved {len(names)} channels to co-locate')
     return names
 
@@ -90,22 +104,34 @@ def run(cfg, steps):
         finding_config=cfg.finding.config,
         gradb2_channel=gradb2_channel, gradb2_subset=gradb2_subset,
         dates=list(cfg.source.date_iterations),
+        **({'tile_index': tile_source.resolve_tile(cfg)[0]}
+           if cfg.is_tile else {}),
     )
 
-    print(f'pipeline={cfg.pipeline}  run_id={cfg.run_id}  '
+    scope = (f'tile {tile_source.resolve_tile(cfg)[0]}' if cfg.is_tile
+             else 'global')
+    print(f'pipeline={cfg.pipeline}  run_id={cfg.run_id}  scope={scope}  '
           f'dates={len(cfg.timestamps)}  gradb2={gradb2_channel} '
           f'(subset={gradb2_subset})  finding_config={cfg.finding.config}')
     print(f'steps={steps}')
     print(f'store -> {cfg.store_url}')
 
     if 'gradb2' in steps:
-        # generate_for_channels() asks only about the channels named here, so a
-        # store that predates a channel added upstream counts as ready rather
-        # than being rebuilt.  Nothing is exported: later steps read the store.
-        wanted = {gradb2_subset: [gradb2_channel]}
-        if cfg.finding.ice_mask_find:
-            wanted['icearea'] = ['SIarea']       # the mask is read from it
-        generate_for_channels(cfg, cfg.products_root, wanted, run_id=cfg.run_id)
+        if cfg.is_tile:
+            channels = [gradb2_channel]
+            if cfg.finding.ice_mask_find:
+                channels.append('SIarea')
+            tile_source.generate(cfg, channels)
+        else:
+            # generate_for_channels() asks only about the channels named here,
+            # so a store that predates a channel added upstream counts as ready
+            # rather than being rebuilt.  Nothing is exported: later steps read
+            # the store.
+            wanted = {gradb2_subset: [gradb2_channel]}
+            if cfg.finding.ice_mask_find:
+                wanted['icearea'] = ['SIarea']   # the mask is read from it
+            generate_for_channels(cfg, cfg.products_root, wanted,
+                                  run_id=cfg.run_id)
 
     # Resolved once for all timestamps: it builds every missing store.
     property_names = _colocation_channels(cfg) if 'colocate' in steps else None
@@ -142,6 +168,11 @@ def run(cfg, steps):
                     clobber=cfg.clobber('colocate'))
 
     if 'push' in steps:
+        if cfg.is_tile:
+            raise ValueError(
+                "'push' publishes beside the global source stores, which a "
+                "tile run has none of.  Drop it from --steps; the store is "
+                f"at {cfg.store_url}.")
         llc_publish.push_run(cfg, store, clobber=cfg.clobber('push'))
 
 

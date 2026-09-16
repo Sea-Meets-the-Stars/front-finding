@@ -138,7 +138,15 @@ def test_rasters_are_chunked_and_downcast(store):
     store.write_group(D1, (b * 1).astype(np.int64), _geometry())
     assert store.binary(D1).dtype == bool
     assert store.labels(D1).dtype == np.int32        # int64 narrowed
-    assert store.labels(D1).chunks == CHUNK
+    # 64 x 64 here, so the chunk is the array: a raster smaller than CHUNK is
+    # one chunk, not a chunk grid reaching past its own edge.
+    assert store.labels(D1).chunks == b.shape
+
+
+def test_a_raster_larger_than_a_chunk_is_chunked_at_CHUNK(store):
+    big = np.zeros((CHUNK[0] * 2, CHUNK[1] + 10), dtype=bool)
+    store.write_binary(D1, big)
+    assert store.binary(D1).chunks == CHUNK
 
 
 def test_binary_unprocessed_round_trips(store):
