@@ -1,0 +1,115 @@
+# ---------------------------------------------------------------------------
+# build-fronts -- one global OSN snapshot, find and group only.
+#
+# The minimum global build a scene can be cut from: the gradb2 field, the
+# binary front map, and the labelled fronts with their geometry.  No
+# co-location, so no subset beyond frontal_structure is ever generated.
+#
+#   build-fronts --config configs/run/scene_crop_330.yaml \
+#       --build-version SCENE330 --steps gradb2,find,group
+#   fronts-scene --config configs/run/scene_crop_330.yaml --tile 330 \
+#       --output ./scenes --npy
+#
+# --build-version is NOT optional here: the CLI overrides finding.build_version
+# with its own default ('V5') whenever the flag is absent, while fronts-scene
+# reads the config.  Omit it and the build writes to V5/OSN while the scene
+# looks in SCENE330/OSN and reports no label map.
+#
+# There is no separate scene config.  fronts-scene takes THIS file -- it needs
+# the store the build wrote and the source store gradb2 came from, and both
+# are here.
+#
+# Runtime: `find` thresholds all 224M pixels of the global grid, which is the
+# expensive part.  `group` then labels ~117k fronts.  Tile 330 (California
+# Current / Monterey Bay, rect j 9360:10080, i 12960:13680) should hold
+# roughly 250 of them.
+# ---------------------------------------------------------------------------
+
+# ===========================================================================
+# source -- where the global LLC4320 fields come from (dbof's keys).
+# ===========================================================================
+source:
+
+  # OSN reads Theta/Salt straight from the public kerchunk endpoints, so this
+  # needs no prior transfer into LLC4320_RAW -- unlike SURF.  Surface-only, and
+  # gradb2 is bare (no depth suffix).
+  pipeline: "OSN"
+
+  run:
+    run_id: "scene330"
+    log_dir: "./logs/"
+
+  output:
+    # Where the gradb2 step writes the generated store, and therefore where
+    # find reads it from:
+    #   s3://dbof/globals_for_fronts/scene330/20120629_000000/frontal_structure.zarr
+    # Its own folder rather than the OSN default (surface_fields/), so this run
+    # cannot collide with another.
+    s3_endpoint: "https://s3-west.nrp-nautilus.io"
+    bucket: "dbof/"
+    folder: "globals_for_fronts/"
+
+  runtime:
+    zarr_async_concurrency: 8
+    dask_scheduler: "distributed"
+    dask_n_workers: 4
+    dask_threads_per_worker: 4
+
+  # Only the subset that owns gradb2.  find and group need nothing else, and
+  # without a colocate step nothing else is ever asked for.
+  active_subsets:
+    - frontal_structure
+
+  # Static grid store -- lat/lon for every (j, i), read by `group` to place
+  # each front.  These are the defaults; the block can be omitted.
+  grid:
+    bucket: "dbof"
+    folder: "LLC4320_GRID_2D"
+    dataset_name: "llc4320_grid.zarr"
+
+  data:
+    # One snapshot.  Inside the OSN llc_surf coverage (2011-09-13 ->
+    # 2012-11-15), and the first hour of the tile330 series in
+    # llc4320-native-grid-preprocessing/configs/tiles/tile330_gradb2_osn.yaml,
+    # so the same hour can be recomputed tile-natively as a cross-check.
+    date_iterations:
+      - '2012-06-29 00:00:00'
+
+# ===========================================================================
+# finding -- how fronts are found.  Nothing here describes co-location.
+# ===========================================================================
+finding:
+
+  # Products land in {products.root}/SCENE330/OSN/fronts.zarr.  Pass the same
+  # string to build-fronts as --build-version; see the note at the top.
+  build_version: "SCENE330"
+
+  # finding_config_D.yaml: window 64, threshold 85, sharpen + despur.  The
+  # config the production builds use, so the front density is the familiar one.
+  config: "D"
+
+  gradb2_root: "gradb2"
+  suffix: "sfc"           # no effect on OSN
+
+  # Both off: either would need an icearea store, which is a second subset to
+  # generate.  Fronts are found on the unmasked field.
+  ice_mask_find:  false
+  ice_mask_props: false
+
+  # The pre-post-processing threshold map.  Only co-location's
+  # dilate_only_to_front_pixels reads it, and there is no co-location here, so
+  # this saves a second 224M-pixel raster on disk.  Turn it on if you later
+  # add a colocate step that wants it.
+  save_unprocessed_binary: false
+
+  clobber:
+    find: false
+    group: false
+    colocate: false
+    push: false
+
+# ===========================================================================
+# products -- where this build writes.  Relative to THIS FILE.
+# ===========================================================================
+products:
+  root: "../../output"
