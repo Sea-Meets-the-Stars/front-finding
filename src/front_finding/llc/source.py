@@ -113,11 +113,6 @@ def read_channel_window(cfg, timestamp: str, channel: str, subset: str,
     Returns:
         np.ndarray: ``(y1 - y0, x1 - x0)``.
     """
-    if cfg.is_tile:
-        raise ValueError(
-            "read_channel_window is for the global stores; a tile run's fields "
-            "are already one tile.  Read them with llc.tiles.read_channel.")
-
     y0, y1, x0, x1 = window
     date_prefix = _date_prefix(cfg, timestamp)
     dataset_name = (cfg.source.dataset_name
