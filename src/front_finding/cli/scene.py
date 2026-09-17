@@ -125,8 +125,11 @@ def parse_args(argv: List[str] = None) -> argparse.Namespace:
     p.add_argument('--window', type=int, nargs=4, default=None,
                    metavar=('Y0', 'Y1', 'X0', 'X1'),
                    help='Explicit rect-grid window instead of --tile.')
-    p.add_argument('--output', default='.',
-                   help='Output file, or a directory to name one in.')
+    p.add_argument('--output', default=None,
+                   help="Output file, or a directory to name one in.  "
+                        "Defaults to a 'scenes' directory beside the build's "
+                        "store, so scenes land with the products rather than "
+                        "wherever the command was run.")
     p.add_argument('--npy', action='store_true',
                    help='Also write the label map on its own, as .npy.')
     return p.parse_args(argv)
@@ -144,11 +147,15 @@ def main(argv=None):
     ds = crop(cfg, date, window, store=store)
     print(f"{ds.attrs['n_fronts']} fronts in {window} of {store.url}")
 
-    out = args.output
-    if os.path.isdir(out):
+    # A path ending in an extension is the file; anything else is a directory
+    # to name one in.  Either way the parent is created -- the default lands
+    # beside the build's store, which has no 'scenes' directory yet.
+    out = args.output or os.path.join(cfg.products_root, 'scenes')
+    if not os.path.splitext(out)[1]:
         name = (f"tile{args.tile:03d}" if args.tile is not None
                 else "j{}-{}_i{}-{}".format(*window))
         out = os.path.join(out, f"fronts_{name}_{date}.nc")
+    os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
     ds.to_netcdf(out)
     print(f"wrote {out}")
 

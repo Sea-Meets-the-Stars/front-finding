@@ -99,11 +99,11 @@ A build is global.  Crop one tile out of it -- the gradb2 field, the front map,
 and the table rows of the fronts inside it:
 
 ```bash
-fronts-scene --config configs/run/small_fronts_dataset_00.yaml --tile 330 \
-    --output ./scenes --npy
+fronts-scene --config configs/run/scene_crop_330.yaml --tile 330 --npy
 ```
 
-One NetCDF.  Nothing is recomputed: a window read and a table subset, seconds.
+One NetCDF, written beside the build's store.  Nothing is recomputed: a window
+read and a table subset, seconds.
 Labels keep their global values, so a front in a scene is the same front in the
 build.
 
@@ -113,7 +113,7 @@ build.
 pytest -q
 ```
 
-242 tests, no network. The integration tests build a Fronts tree in a temp
+243 tests, no network. The integration tests build a Fronts tree in a temp
 directory and run the real find/group/colocate stages; everything else is
 unit-level or pins the contract with dbof.
 
@@ -123,8 +123,7 @@ unit-level or pins the contract with dbof.
 src/front_finding/
   buildconfig.py   typed run configuration
   store.py         the zarr store every product is written to and read from
-  scene.py         crop a build to one 720x720 tile
-  cli/             build-fronts entry point
+  cli/             build-fronts and fronts-scene entry points
   finding/         detection: thresholding, sharpening, thinning, spur removal
   llc/             source-field reads, S3 publication
   properties/      labelling, geometry, co-location

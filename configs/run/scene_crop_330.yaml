@@ -7,8 +7,16 @@
 #
 #   build-fronts --config configs/run/scene_crop_330.yaml \
 #       --build-version SCENE330 --steps gradb2,find,group
-#   fronts-scene --config configs/run/scene_crop_330.yaml --tile 330 \
-#       --output ./scenes --npy
+#   fronts-scene --config configs/run/scene_crop_330.yaml --tile 330 --npy
+#
+# Products are built on local disk (products.root, below).  'push' publishes
+# the store to S3, beside the fields it was built from:
+#
+#   .../scene330/20120629_000000/frontal_structure.zarr    the source fields
+#   .../scene330/Fronts/SCENE330/OSN/fronts.zarr           build-fronts --steps push
+#
+# both under s3://dbof/globals_for_fronts/.  Scenes stay local; copy them up by
+# hand if you want them there.
 #
 # --build-version is NOT optional here: the CLI overrides finding.build_version
 # with its own default ('V5') whenever the flag is absent, while fronts-scene
@@ -109,7 +117,11 @@ finding:
     push: false
 
 # ===========================================================================
-# products -- where this build writes.  Relative to THIS FILE.
+# products -- the build's working area on local disk.
+#
+# Each step reads the previous step's output, so the products need somewhere
+# on disk; 'push' then copies the finished set to S3, beside the source stores
+# it was built from.  Relative to THIS FILE, and gitignored.
 # ===========================================================================
 products:
   root: "../../output"

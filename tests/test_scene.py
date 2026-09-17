@@ -6,12 +6,14 @@ front outside the window.
 """
 import argparse
 import textwrap
+from pathlib import Path
 
 import numpy as np
 import pytest
 import xarray as xr
 
-from front_finding import buildconfig, scene
+from front_finding import buildconfig
+from front_finding.cli import scene
 from front_finding.finding import run as finding_run
 from front_finding.llc import source as llc_source
 from front_finding.properties import run as prun
@@ -76,12 +78,16 @@ def _gradb2(n=N):
 
 
 @pytest.fixture
-def built(tmp_path, monkeypatch):
-    """A real store with find, group and colocate done; S3 reads stubbed."""
+def cfg(tmp_path):
+    """The run config a scene is cut from."""
     path = tmp_path / 'run.yaml'
     path.write_text(textwrap.dedent(_YAML))
-    cfg = buildconfig.load_config(str(path))
+    return buildconfig.load_config(str(path))
 
+
+@pytest.fixture
+def built(cfg, tmp_path, monkeypatch):
+    """A real store with find, group and colocate done; S3 reads stubbed."""
     gradb2 = _gradb2()
     lat = np.repeat(np.linspace(-60, 60, N)[:, None], N, axis=1)
     lon = np.repeat(np.linspace(-180, 180, N)[None, :], N, axis=0)
@@ -178,6 +184,20 @@ def test_it_round_trips_through_netcdf(ds, tmp_path):
     reread = xr.open_dataset(path)
     np.testing.assert_array_equal(reread['labels'].values, ds['labels'].values)
     assert reread.sizes['front'] == ds.sizes['front']
+
+
+# -- where it writes ----------------------------------------------------------
+
+def test_the_scene_lands_beside_the_store_by_default(built, monkeypatch):
+    cfg, store, tmp_path = built
+    monkeypatch.setattr(scene.FrontStore, 'open',
+                        classmethod(lambda cls, url, **kw: store))
+    monkeypatch.setattr(scene.buildconfig, 'load_config', lambda *a, **k: cfg)
+    scene.main(['--config', 'ignored.yaml', '--window', '40', '140', '40', '140',
+                '--npy'])
+    out = Path(cfg.products_root) / 'scenes' / f'fronts_j40-140_i40-140_{DATE}.nc'
+    assert out.is_file()
+    assert out.with_name(out.stem + '_labels.npy').is_file()
 
 
 # -- CLI --------------------------------------------------------------------
