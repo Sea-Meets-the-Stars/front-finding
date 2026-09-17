@@ -12,6 +12,8 @@ colocate
     Build the remaining subsets, export their channels, co-locate.
 push
     Copy the front products back to S3, next to the stores they came from.
+    Runs at the end of every build unless --no-push; name it in --steps to
+    publish without building anything.
 
 ``gradb2``, ``find`` and ``group`` are self-contained: a front-binary map costs
 one subset.  ``colocate`` is the only step that needs the other fields.
@@ -76,8 +78,17 @@ def _colocation_channels(cfg):
     return names
 
 
-def run(cfg, steps):
-    """Execute *steps* (already ordered and validated) for *cfg*."""
+def run(cfg, steps, push: bool = True):
+    """Execute *steps* (already ordered and validated) for *cfg*.
+
+    Args:
+        cfg: The resolved run config (BuildJobConfig).
+        steps: Steps to run, in pipeline order.
+        push (bool): Publish the store to S3 when the build finishes.  On by
+            default: a build's products belong beside the fields they were
+            made from, and push skips keys already there, so a re-run costs a
+            listing rather than an upload.
+    """
     gradb2_channel, gradb2_subset = _resolve_gradb2(cfg)
 
     # 'a' so a re-run adds to the build rather than discarding it; the store
@@ -141,7 +152,7 @@ def run(cfg, steps):
                     skip_missing=True,
                     clobber=cfg.clobber('colocate'))
 
-    if 'push' in steps:
+    if push or 'push' in steps:
         llc_publish.push_run(cfg, store, clobber=cfg.clobber('push'))
 
 
@@ -177,6 +188,9 @@ def parse_args(argv: List[str] = None) -> argparse.Namespace:
                    help='Override source.run.run_id from the config.')
     p.add_argument('--build-version', default=None,
                    help='Override finding.build_version from the config.')
+    p.add_argument('--no-push', action='store_true',
+                   help='Leave the products on local disk instead of '
+                        'publishing them to S3 when the build finishes.')
     return p.parse_args(argv)
 
 
@@ -186,7 +200,7 @@ def main(argv=None):
     cfg = buildconfig.load_config(args.config,
                                   build_version=args.build_version or BUILD_VERSION,
                                   run_id=args.run_id)
-    run(cfg, steps)
+    run(cfg, steps, push=not args.no_push)
 
 
 if __name__ == '__main__':

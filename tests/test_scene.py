@@ -14,6 +14,7 @@ import xarray as xr
 
 from front_finding import buildconfig
 from front_finding.cli import scene
+from front_finding.llc import publish as llc_publish
 from front_finding.finding import run as finding_run
 from front_finding.llc import source as llc_source
 from front_finding.properties import run as prun
@@ -194,10 +195,63 @@ def test_the_scene_lands_beside_the_store_by_default(built, monkeypatch):
                         classmethod(lambda cls, url, **kw: store))
     monkeypatch.setattr(scene.buildconfig, 'load_config', lambda *a, **k: cfg)
     scene.main(['--config', 'ignored.yaml', '--window', '40', '140', '40', '140',
-                '--npy'])
+                '--npy', '--no-push'])
     out = Path(cfg.products_root) / 'scenes' / f'fronts_j40-140_i40-140_{DATE}.nc'
     assert out.is_file()
     assert out.with_name(out.stem + '_labels.npy').is_file()
+
+
+# -- publishing ---------------------------------------------------------------
+
+def test_scenes_publish_beside_the_store(cfg):
+    """Same bucket and run as the source fields, under the build's own key."""
+    store = llc_publish.store_s3_prefix(cfg)
+    scenes = llc_publish.scene_s3_prefix(cfg)
+    assert store.endswith('/STEST/SURF/fronts.zarr')
+    assert scenes.endswith('/STEST/SURF/scenes')
+    assert store.rsplit('/', 1)[0] == scenes.rsplit('/', 1)[0]
+
+
+def test_a_dry_run_names_the_keys_without_uploading(cfg, tmp_path):
+    local = tmp_path / 'fronts_tile330_20111204_000000.nc'
+    local.write_bytes(b'not really a netcdf')
+    uris = llc_publish.push_files(cfg, [str(local)],
+                                  llc_publish.scene_s3_prefix(cfg),
+                                  dry_run=True)
+    assert uris == [f"s3://{llc_publish.scene_s3_prefix(cfg)}/{local.name}"]
+
+
+def _run_scene(monkeypatch, cfg, store, argv):
+    """Run the CLI with the store stubbed, capturing what it would upload."""
+    monkeypatch.setattr(scene.FrontStore, 'open',
+                        classmethod(lambda cls, url, **kw: store))
+    monkeypatch.setattr(scene.buildconfig, 'load_config', lambda *a, **k: cfg)
+    pushed = {}
+    monkeypatch.setattr(llc_publish, 'push_files',
+                        lambda cfg_, paths, prefix, **kw: pushed.update(
+                            paths=list(paths), prefix=prefix) or [])
+    scene.main(argv)
+    return pushed
+
+
+def test_a_scene_publishes_itself(built, monkeypatch):
+    """No flag needed -- the scene lands on S3 beside the build."""
+    cfg, store, _ = built
+    pushed = _run_scene(monkeypatch, cfg, store,
+                        ['--config', 'x.yaml', '--window', '40', '140',
+                         '40', '140', '--npy'])
+    assert pushed['prefix'] == llc_publish.scene_s3_prefix(cfg)
+    assert len(pushed['paths']) == 2                      # the .nc and the .npy
+    assert pushed['paths'][0].endswith('.nc')
+    assert pushed['paths'][1].endswith('_labels.npy')
+
+
+def test_no_push_keeps_it_local(built, monkeypatch):
+    cfg, store, _ = built
+    pushed = _run_scene(monkeypatch, cfg, store,
+                        ['--config', 'x.yaml', '--window', '40', '140',
+                         '40', '140', '--no-push'])
+    assert pushed == {}
 
 
 # -- CLI --------------------------------------------------------------------

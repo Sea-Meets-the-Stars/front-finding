@@ -981,6 +981,18 @@ def test_step5_publishes_the_store(spies, surf_cfg):
     assert spies["read"].calls == []                   # push only
 
 
+def test_a_build_publishes_itself(spies, surf_cfg):
+    """Products belong beside the fields they were made from, so push is not
+    something you have to remember to ask for."""
+    build_fronts.run(surf_cfg, ["find", "group"])
+    assert len(spies["push"].calls) == 1
+
+
+def test_no_push_leaves_the_products_local(spies, surf_cfg):
+    build_fronts.run(surf_cfg, ["find", "group"], push=False)
+    assert spies["push"].calls == []
+
+
 # ===========================================================================
 #  Build provenance lives in the store, not a sidecar file
 # ===========================================================================

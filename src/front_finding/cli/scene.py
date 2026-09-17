@@ -25,6 +25,7 @@ import numpy as np
 import xarray as xr
 
 from front_finding import buildconfig
+from front_finding.llc import publish as llc_publish
 from front_finding.llc import source as llc_source
 from front_finding.properties.run import channel_for_root, subset_for_channel
 from front_finding.store import FrontStore
@@ -132,6 +133,13 @@ def parse_args(argv: List[str] = None) -> argparse.Namespace:
                         "wherever the command was run.")
     p.add_argument('--npy', action='store_true',
                    help='Also write the label map on its own, as .npy.')
+    p.add_argument('--no-push', action='store_true',
+                   help='Leave the scene on local disk instead of publishing '
+                        'it to S3 beside the build it came from.')
+    p.add_argument('--clobber', action='store_true',
+                   help='Replace S3 keys that already exist.')
+    p.add_argument('--dry-run', action='store_true',
+                   help='Report the S3 keys without uploading.')
     return p.parse_args(argv)
 
 
@@ -159,10 +167,18 @@ def main(argv=None):
     ds.to_netcdf(out)
     print(f"wrote {out}")
 
+    written = [out]
     if args.npy:
         npy = os.path.splitext(out)[0] + '_labels.npy'
         np.save(npy, ds['labels'].values)
         print(f"wrote {npy}")
+        written.append(npy)
+
+    if not args.no_push:
+        prefix = llc_publish.scene_s3_prefix(cfg)
+        print(f"Publishing to s3://{prefix}")
+        llc_publish.push_files(cfg, written, prefix, clobber=args.clobber,
+                               dry_run=args.dry_run)
 
 
 if __name__ == '__main__':

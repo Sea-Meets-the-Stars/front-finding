@@ -5,6 +5,7 @@ A build's products are one zarr store, so publishing copies that store to a
 
     s3://{bucket}/{folder}/{run_id}/{YYYYMMDD_HHMMSS}/frontal_structure.zarr
     s3://{bucket}/{folder}/{run_id}/Fronts/{build_version}/{pipeline}/fronts.zarr
+    s3://{bucket}/{folder}/{run_id}/Fronts/{build_version}/{pipeline}/scenes/*.nc
 
 The store spans every snapshot, so it sits beside the date directories rather
 than inside one, and carries the build version and pipeline in its key so two
@@ -41,6 +42,57 @@ def store_s3_prefix(cfg, subfolder: str = DEFAULT_SUBFOLDER,
     s3 = _s3_settings(cfg)
     return '/'.join([s3['bucket'], s3['folder'], run_id or s3['run_id'],
                      subfolder, cfg.run_dir, 'fronts.zarr'])
+
+
+def scene_s3_prefix(cfg, subfolder: str = DEFAULT_SUBFOLDER,
+                    run_id: str = None) -> str:
+    """The S3 key prefix (no scheme) scenes cut from this build publish to.
+
+    Beside the store rather than inside it: a scene is a NetCDF, not part of
+    the zarr, and several can be cut from one build.
+    """
+    s3 = _s3_settings(cfg)
+    return '/'.join([s3['bucket'], s3['folder'], run_id or s3['run_id'],
+                     subfolder, cfg.run_dir, 'scenes'])
+
+
+def push_files(cfg, paths: list, prefix: str, clobber: bool = False,
+               dry_run: bool = False, fs=None) -> list:
+    """Upload loose files to *prefix*, each keeping its name on disk.
+
+    The counterpart to :func:`push_timestamp` for products that are single
+    files rather than a zarr tree.
+
+    Args:
+        cfg: The resolved run config (BuildJobConfig); supplies the endpoint.
+        paths (list): Local file paths to upload.
+        prefix (str): Destination key prefix, no scheme.
+        clobber (bool): Overwrite keys that already exist.  Default skips them.
+        dry_run (bool): Report what would be uploaded without touching S3.
+        fs: Reuse a synchronous S3 filesystem across calls.
+
+    Returns:
+        list of str: ``s3://`` URIs now holding the files.
+    """
+    if fs is None and not dry_run:
+        _, fs = create_s3_filesystems(_s3_settings(cfg)['s3_endpoint'])
+
+    written, skipped = [], 0
+    for path in paths:
+        key = f"{prefix}/{os.path.basename(path)}"
+        uri = f"s3://{key}"
+        if not dry_run:
+            if not clobber and fs.exists(key):
+                skipped += 1
+                written.append(uri)
+                continue
+            fs.put(path, key)
+        written.append(uri)
+        print(f"  {'[DRY RUN] would upload' if dry_run else 'uploaded'} {uri}")
+
+    if skipped:
+        print(f"  skipped {skipped} already present; pass --clobber to replace")
+    return written
 
 
 def _local_store_path(store) -> str:
