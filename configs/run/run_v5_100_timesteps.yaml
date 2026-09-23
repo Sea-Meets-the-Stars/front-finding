@@ -32,7 +32,7 @@ source:
     # The source dataset.  Locates the zarr stores on S3 and is stamped into
     # every output filename; the output *directory* comes from
     # finding.build_version.
-    run_id: "v2_2_01"
+    run_id: "v2_2_03"
     log_dir: "./logs/"
 
   output:
@@ -62,12 +62,12 @@ source:
     - frontal_structure   # gradb2, gradsalt2, gradtheta2, gradeta2, gradrho2,
                           # turner_angle, density, buoyancy
     - icearea             # SIarea
-    # - kinematic         # relative_vorticity, strain_*, divergence,
-    #                     # rossby_number, okubo_weiss, coriolis_f
-    # - frontogenesis     # frontogenesis_tendency/geo/ageo, ug, vg
-    # - native_fields     # Theta, Salt, Eta, W (+ computed U, V)
-    # - surface_wind      # oceTAUX, oceTAUY, oceQnet, wind_stress_curl,
-    #                     # ekman_pumping, u_ekman, v_ekman
+    - kinematic         # relative_vorticity, strain_*, divergence,
+                         # rossby_number, okubo_weiss, coriolis_f
+     #- frontogenesis     # frontogenesis_tendency/geo/ageo, ug, vg
+    - native_fields     # Theta, Salt, Eta, W (+ computed U, V)
+    - surface_wind      # oceTAUX, oceTAUY, oceQnet, wind_stress_curl,
+                         # ekman_pumping, u_ekman, v_ekman
 
   # depth_suffixes has no effect on SURF -- every channel is inherently 2D.
 
@@ -193,7 +193,7 @@ source:
 finding:
 
   # Products land in {products.root}/{build_version}/{pipeline}/.
-  build_version: "V5"
+  build_version: "100_TIMESTEPS_FRONTS"
 
   # Front-finding config -> front_finding/finding/configs/finding_config_D.yaml
   config: "D"
@@ -216,10 +216,10 @@ finding:
   # Pixels each front is dilated by before its properties are sampled, so the
   # statistics describe a band around the front rather than the skeleton
   # itself.  0 samples the front pixels alone.
-  properties_dilation_radius: 1
+  properties_dilation_radius: 2
 
   # Statistics per co-located channel.  Omit for mean/std/median.
-  properties_stats: ["mean", "std", "median"]
+  properties_stats: ["mean", "std", "min", "max", "skew"]
 
   # 'omit' drops NaN, 'propagate' lets one NaN pixel make a front's whole
   # statistic NaN.  The fields carry NaN over land.
@@ -228,14 +228,12 @@ finding:
   # Thickness beyond that band, described separately in the store's
   # cross_properties table.  0 skips it.  Unlike the band above, this region
   # may overlap neighbouring fronts -- it describes the front's surroundings.
-  properties_cross_front_radius: 0
+  properties_cross_front_radius: 4
 
   # Restrict the band above to pixels the threshold flagged, so it follows the
   # gradient ridge's real width instead of a disc.  Needs binary_unprocessed in
   # the store.  The cross-front band stays unmasked and absorbs what is dropped.
-  dilate_only_to_front_pixels: false
-
-  percentiles: [25, 75, 90]
+  dilate_only_to_front_pixels: true
 
   # Property roots to leave out of co-location.
   exclude_roots: []
