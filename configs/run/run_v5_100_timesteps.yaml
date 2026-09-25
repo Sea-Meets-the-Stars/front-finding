@@ -248,9 +248,9 @@ finding:
   # source store needs rebuilding is dbof's existence check to make.
   clobber:
     find: false
-    group: false
-    colocate: false
-    push: false
+    group: true
+    colocate: true
+    push: true
 
 # ===========================================================================
 # products -- where this build writes.

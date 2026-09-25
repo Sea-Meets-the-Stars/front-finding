@@ -145,11 +145,13 @@ def calculate_front_orientation(mask: np.ndarray) -> float:
     major axis, in [-π/2, π/2]. An E-W front has its major axis perpendicular
     to rows → ~±90°; an N-S front → ~0°. Taking abs() gives the correct
     convention directly without further transformation.
+
+    Note - I removed abs() of angle so that I could calculate wind angle. - Jake
     """
     props = measure.regionprops(mask.astype(int))
     if not props:
         return np.nan
-    return float(abs(np.degrees(props[0].orientation)))
+    return float(np.degrees(props[0].orientation))
 
 
 def calculate_front_curvature(
