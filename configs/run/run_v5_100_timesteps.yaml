@@ -228,7 +228,7 @@ finding:
   # Thickness beyond that band, described separately in the store's
   # cross_properties table.  0 skips it.  Unlike the band above, this region
   # may overlap neighbouring fronts -- it describes the front's surroundings.
-  properties_cross_front_radius: 4
+  properties_cross_front_radius: 0
 
   # Restrict the band above to pixels the threshold flagged, so it follows the
   # gradient ridge's real width instead of a disc.  Needs binary_unprocessed in
