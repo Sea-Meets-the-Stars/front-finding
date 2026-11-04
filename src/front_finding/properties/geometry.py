@@ -134,19 +134,43 @@ def calculate_front_orientation(mask: np.ndarray) -> float:
     Returns
     -------
     orientation : float
-        Acute angle from North (0–90°):
-        - 0°  = N-S front (meridional)
-        - 45° = diagonal (NE-SW or NW-SE)
-        - 90° = E-W front (zonal)
+        Signed angle from North, in [-90, 90] degrees, or NaN for an empty
+        mask:
+        - 0     = N-S front (meridional)
+        - +/-45 = diagonal; +45 is NE-SW, -45 is NW-SE
+        - +/-90 = E-W front (zonal)
 
     Notes
     -----
-    regionprops.orientation is the angle between axis-0 (rows, N-S) and the
-    major axis, in [-π/2, π/2]. An E-W front has its major axis perpendicular
-    to rows → ~±90°; an N-S front → ~0°. Taking abs() gives the correct
-    convention directly without further transformation.
+    regionprops.orientation is the angle between axis-0 (rows) and the major
+    axis of the equivalent-second-moment ellipse.  Only the three second
+    moments survive it, so a curved front collapses to one global axis, and a
+    front with little elongation has an essentially arbitrary orientation --
+    screen on npix or eccentricity before relying on the value.
 
-    Note - I removed abs() of angle so that I could calculate wind angle. - Jake
+    The full 180-degree range is kept rather than folded to [0, 90] with
+    abs():  +45 and -45 are perpendicular axes, so folding makes the two
+    diagonals indistinguishable.  Anything that compares a front to a
+    direction -- the angle between a front and the wind, for one -- needs the
+    sign.
+
+    Fronts are labeled on the stitched global raster, whose axis-0 runs north
+    and axis-1 runs east.  The angle is therefore geographic, not
+    model-relative, and no CS/SN rotation applies to it -- the CS/SN carried
+    in the grid store describe the native face axes, which differ from the
+    stitched ones by 90 degrees over half the map.  Two limits on that, both
+    measured against LLC4320_GRID_2D:
+
+    - axis-1 is exactly east only from 70S to 60N; poleward of that the column
+      axis departs from east by up to 27 degrees;
+    - the grid is near-square but not square (dyC/dxC is typically within 10%
+      of 1), and an index-space angle is distorted by that ratio -- by at most
+      ~3.6 degrees between 70S and 70N, and ~13 degrees south of 70S.  Where
+      that matters, rebuild the angle from the direction cosines weighted by
+      dxC and dyC.
+
+    For an angle measured counter-clockwise from east, as atan2 returns, use
+    ``90 - orientation``.
     """
     props = measure.regionprops(mask.astype(int))
     if not props:

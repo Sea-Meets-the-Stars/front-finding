@@ -106,11 +106,67 @@ def test_branch_points_zero_on_a_line_and_nonzero_on_a_tee():
     assert geometry.calculate_branch_points(tee) >= 1
 
 
-def test_orientation_distinguishes_vertical_from_horizontal():
-    vert = np.zeros((20, 20), dtype=bool); vert[5:15, 10] = True
-    horiz = np.zeros((20, 20), dtype=bool); horiz[10, 5:15] = True
-    assert geometry.calculate_front_orientation(vert) != \
-        geometry.calculate_front_orientation(horiz)
+def _straight_front(drow, dcol, n=15):
+    """A one-pixel-wide straight front stepping (drow, dcol) per pixel."""
+    mask = np.zeros((2 * n + 1, 2 * n + 1), dtype=bool)
+    for t in range(-n, n + 1):
+        row, col = n + t * drow, n + t * dcol
+        if 0 <= row <= 2 * n and 0 <= col <= 2 * n:
+            mask[row, col] = True
+    return mask
+
+
+def _wind_front_angle(orientation, tau_east, tau_north):
+    """The conversion documented on calculate_front_orientation.
+
+    Returns the acute angle between the front's axis and the wind: 0 when the
+    wind blows along the front, 90 when it blows across.  ``90 -`` is there
+    because orientation is measured from the row axis while arctan2 measures
+    from the column axis.
+    """
+    wind = np.degrees(np.arctan2(tau_north, tau_east))
+    front = 90.0 - orientation
+    return abs(((wind - front + 90.0) % 180.0) - 90.0)
+
+
+def test_orientation_is_measured_from_the_row_axis():
+    """0 for a meridional front, +/-90 for a zonal one.
+
+    Rows of the stitched raster run north and columns run east, so a front
+    down one column is meridional and a front along one row is zonal.  Every
+    comparison of a front to a direction depends on which axis is the zero,
+    so the values are pinned rather than just asserted to differ.
+    """
+    meridional = _straight_front(1, 0)
+    zonal = _straight_front(0, 1)
+    assert geometry.calculate_front_orientation(meridional) == pytest.approx(0.0)
+    assert abs(geometry.calculate_front_orientation(zonal)) == pytest.approx(90.0)
+
+
+def test_the_two_diagonals_keep_opposite_signs():
+    """NE-SW and NW-SE are perpendicular axes; folding to [0, 90] merges them."""
+    assert geometry.calculate_front_orientation(
+        _straight_front(1, 1)) == pytest.approx(45.0)
+    assert geometry.calculate_front_orientation(
+        _straight_front(1, -1)) == pytest.approx(-45.0)
+
+
+@pytest.mark.parametrize("drow, dcol, tau_east, tau_north, expected", [
+    (0, 1, 1.0, 0.0, 0.0),      # zonal front, eastward wind -> along
+    (0, 1, 0.0, 1.0, 90.0),     # zonal front, northward wind -> across
+    (1, 0, 1.0, 0.0, 90.0),     # meridional front, eastward wind -> across
+    (1, 0, 0.0, 1.0, 0.0),      # meridional front, northward wind -> along
+    # Both diagonals sit at 45 whichever axis is taken as the zero, so these
+    # two pass even with the convention swapped and cannot guard it alone.
+    (1, 1, 1.0, 0.0, 45.0),
+    (1, -1, 1.0, 0.0, 45.0),
+])
+def test_wind_front_angle_matches_the_documented_conversion(
+        drow, dcol, tau_east, tau_north, expected):
+    orientation = geometry.calculate_front_orientation(
+        _straight_front(drow, dcol))
+    assert _wind_front_angle(orientation, tau_east, tau_north) == \
+        pytest.approx(expected, abs=1e-6)
 
 
 def test_process_single_front_returns_the_expected_columns(latlon):
