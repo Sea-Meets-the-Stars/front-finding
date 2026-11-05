@@ -31,7 +31,7 @@ source:
   run:
     # The source dataset.  Locates the zarr stores on S3 and is stamped into
     # every output filename; the output *directory* comes from
-    # finding.build_version.
+#    finding.build_version: "V5"
     run_id: "v2_2_03"
     log_dir: "./logs/"
 
@@ -64,7 +64,7 @@ source:
     - icearea             # SIarea
     - kinematic         # relative_vorticity, strain_*, divergence,
                          # rossby_number, okubo_weiss, coriolis_f
-     #- frontogenesis     # frontogenesis_tendency/geo/ageo, ug, vg
+    - frontogenesis     # frontogenesis_tendency/geo/ageo, ug, vg
     - native_fields     # Theta, Salt, Eta, W (+ computed U, V)
     - surface_wind      # oceTAUX, oceTAUY, oceQnet, wind_stress_curl,
                          # ekman_pumping, u_ekman, v_ekman
@@ -193,7 +193,7 @@ source:
 finding:
 
   # Products land in {products.root}/{build_version}/{pipeline}/.
-  build_version: "100_TIMESTEPS_FRONTS"
+  build_version: "V5"
 
   # Front-finding config -> front_finding/finding/configs/finding_config_D.yaml
   config: "D"
@@ -248,7 +248,7 @@ finding:
   # source store needs rebuilding is dbof's existence check to make.
   clobber:
     find: false
-    group: true
+    group: false
     colocate: true
     push: true
 
